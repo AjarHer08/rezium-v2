@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, downloadContentFromMessage, writeExif } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs-extra');
@@ -11,63 +11,201 @@ const playdl = require('play-dl');
 const ytdl = require('ytdl-core');
 const https = require('https');
 const http = require('http');
-const express = require('express');
-const localtunnel = require('localtunnel');
+const NodeCache = require('node-cache');
+const ytSearch = require('yt-search');
 
-// Tambahkan setelah impor modul
-const ownerCode = "REZIUM2023"; // Ganti dengan kode yang Anda inginkan
+// Konstanta untuk fitur owner dan premium
+const ownerCode = "REZIUM2023";
 const ownerFile = 'owner.json';
+const premiumFile = 'premium.json';
+const premiumCode = "REZIUM2012";
 
-// Variabel global untuk tunnel
-let tunnelUrl = null;
-const app = express();
-const port = process.env.PORT || 3000;
+// Variabel global untuk fitur anti view once
+let antiViewOnceEnabled = true;
 
-// Buat server sederhana untuk health check
-app.get('/', (req, res) => {
-    res.send('REZIUM-V2 Bot is running!');
+// Lock file untuk single instance
+const INSTANCE_LOCK_FILE = path.join(__dirname, 'bot_instance.lock');
+
+// Atur logger untuk debugging
+const logger = Pino({
+    level: process.env.NODE_ENV === 'production' ? 'warn' : 'debug'
 });
 
-app.get('/health', (req, res) => {
-    res.status(200).json({
-        status: 'ok',
-        message: 'Bot is running',
-        timestamp: new Date().toISOString(),
-        tunnelUrl: tunnelUrl
-    });
-});
+// Tambahkan logging ke console untuk debugging
+const debugLog = (message) => {
+    console.log(`[${new Date().toISOString()}] ${message}`);
+};
 
-// Pastikan file owner.json ada dan tambahkan owner default
-if (!fs.existsSync(ownerFile)) {
-    try {
-        const defaultOwners = [
-            "6287841109073@s.whatsapp.net",
-            "6285765562855@s.whatsapp.net"
-        ];
-        fs.writeFileSync(ownerFile, JSON.stringify(defaultOwners, null, 2));
-        debugLog('File owner.json dibuat dengan owner default');
-    } catch (err) {
-        debugLog(`Error membuat file owner.json: ${err.message}`);
-    }
-} else {
-    // Cek apakah owner baru sudah ada, jika belum tambahkan
-    try {
-        const owners = JSON.parse(fs.readFileSync(ownerFile, 'utf-8'));
-        const newOwner = "6285765562855@s.whatsapp.net";
-        
-        if (!owners.includes(newOwner)) {
-            owners.push(newOwner);
-            fs.writeFileSync(ownerFile, JSON.stringify(owners, null, 2));
-            debugLog(`Owner baru ditambahkan: ${newOwner}`);
+// Gunakan direktori temporary sistem yang lebih aman
+const tempDir = path.join(os.tmpdir(), 'rezium-v2-temp');
+fs.ensureDirSync(tempDir);
+
+// Direktori untuk menyimpan file download
+const downloadDir = path.join(__dirname, 'downloads');
+fs.ensureDirSync(downloadDir);
+
+// Konstanta untuk fitur pp couple
+const PP_COUPLE_DIRECTORY = 'assets';
+const PP_COUPLE_FILE = 'couple-profile.json';
+
+// Konstanta untuk fitur Furina
+const FURINA_DIRECTORY = 'assets';
+const FURINA_FILE = 'furina.json';
+
+// Pinterest cache system
+const pinterestCache = new Map();
+// Bersihkan cache setiap jam
+setInterval(() => {
+    pinterestCache.clear();
+    debugLog('Pinterest cache dibersihkan');
+}, 3600000); // 1 jam
+
+// Tambahkan flag untuk mencegah multiple instance
+let isRunning = false;
+let sock = null;
+
+// Pastikan direktori assets ada
+try {
+    fs.ensureDirSync(PP_COUPLE_DIRECTORY);
+    debugLog('Direktori assets dibuat/ditemukan');
+} catch (err) {
+    debugLog(`Error membuat direktori assets: ${err.message}`);
+}
+
+// Cek apakah file couple-profile.json sudah ada
+const coupleProfilePath = path.join(PP_COUPLE_DIRECTORY, PP_COUPLE_FILE);
+if (!fs.existsSync(coupleProfilePath)) {
+    debugLog('File couple-profile.json tidak ditemukan, membuat file baru...');
+    
+    // Data pasangan gambar profil dengan link yang sama untuk male dan female
+    const coupleData = [
+        {
+            "male": "https://i.pinimg.com/736x/c4/a9/89/c4a98988a67525af11d2e09c5b7dd1c5.jpg",
+            "female": "https://i.pinimg.com/736x/79/af/2e/79af2e06e4e68880ea63e71a7d8418e3.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/f7/d7/90/f7d7906367e9eb059e6712aed573f38a.jpg",
+            "female": "https://i.pinimg.com/736x/50/9c/82/509c82063ce797c4695854c22625e883.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/e8/45/33/e84533ad1413f44e80ecaa88540300cf.jpg",
+            "female": "https://i.pinimg.com/736x/75/5a/b1/755ab149c23002243eaad6e60b559121.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/ad/68/66/ad6866cae7bc8c8fa30a86128571bc46.jpg",
+            "female": "https://i.pinimg.com/736x/9d/1b/b7/9d1bb7c94058bb41073114a94c749923.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/2a/4c/60/2a4c608c7a67e64a4c5f837898e1d709.jpg",
+            "female": "https://i.pinimg.com/736x/0e/34/55/0e34553b256312a334edbe6d4ee9b187.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/25/88/39/258839c975c9a0fcdaedf3d26f0f8649.jpg",
+            "female": "https://i.pinimg.com/736x/c4/6d/e7/c46de713a9b1749e0d1772c28d269673.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/e8/62/86/e86286508bd9f4f7de18a7dabccc63be.jpg",
+            "female": "https://i.pinimg.com/736x/d1/4f/19/d14f19599324e8d07f27b3e071e3f273.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/5f/4b/d8/5f4bd87d8bcf4e31210c57ed8c49128d.jpg",
+            "female": "https://i.pinimg.com/736x/74/c3/9c/74c39c868a1605c4899fe131c2434100.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/8d/e4/6e/8de46ec1edf8c4a3c8adebe777fe1c8a.jpg",
+            "female": "https://i.pinimg.com/736x/62/89/40/628940ec82555629754b0d69908402cf.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/63/64/57/63645713e047c5f5fa687df57ba51963.jpg",
+            "female": "https://i.pinimg.com/736x/fe/f5/01/fef5017c678d7438ec0123d2abcf5e6b.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/72/93/55/7293550a49538edf9bf93d8293b36f9f.jpg",
+            "female": "https://i.pinimg.com/736x/c1/59/84/c159841c8f035e324c8c26ed090d9c6c.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/a1/ec/03/a1ec0351da995588e27bf622e05a3792.jpg",
+            "female": "https://i.pinimg.com/736x/9a/4d/0b/9a4d0b8ceca71e10acecfdad9dfbb180.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/83/4b/a7/834ba7f4dbb38c406fb90c0788cbac2e.jpg",
+            "female": "https://i.pinimg.com/736x/1f/cf/7a/1fcf7a41d3f0b606436d7ca2272de029.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/66/7e/62/667e622becae6cfa0eaa4e4154842904.jpg",
+            "female": "https://i.pinimg.com/736x/9d/17/a4/9d17a4998f2769a328c3368ef6c9f6be.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/e6/a7/e0/e6a7e09497ee976200c393ea08fa732b.jpg",
+            "female": "https://i.pinimg.com/736x/a4/fd/56/a4fd563a3f38d829906252451bfc6ba4.jpg"
+        },
+        {
+            "male": "https://i.pinimg.com/736x/85/8c/80/858c805eb976c9579e4930fb7aa3fef4.jpg",
+            "female": "https://i.pinimg.com/736x/01/f4/be/01f4be299061e19ce9a38103a4af6064.jpg"
         }
+    ];
+    
+    // Simpan data ke file JSON hanya jika belum ada
+    try {
+        fs.writeFileSync(coupleProfilePath, JSON.stringify(coupleData, null, 2));
+        debugLog('File couple-profile.json berhasil dibuat');
     } catch (err) {
-        debugLog(`Error menambah owner baru: ${err.message}`);
+        debugLog(`Error membuat file couple-profile.json: ${err.message}`);
     }
 }
 
-// Tambahkan setelah konstanta owner
-const premiumFile = 'premium.json';
-const premiumCode = "REZIUM2023"; // Kode khusus untuk premium
+// Cek apakah file furina.json sudah ada
+const furinaProfilePath = path.join(FURINA_DIRECTORY, FURINA_FILE);
+if (!fs.existsSync(furinaProfilePath)) {
+    debugLog('File furina.json tidak ditemukan, membuat file baru...');
+    
+    // Data gambar Furina yang lebih lengkap dan valid
+    const furinaData = [
+    "https://i.pinimg.com/736x/60/dd/63/60dd635177b5add9b112c4bfac471bdd.jpg",
+    "https://i.pinimg.com/736x/3e/ec/de/3eecde57a47183dd187899ad326bbbee.jpg",
+    "https://i.pinimg.com/736x/6d/6f/f4/6d6ff45a555f649b1434099f47ca48ce.jpg",
+    "https://i.pinimg.com/736x/24/a3/8c/24a38c289a1565af1a2b48de854cad17.jpg",
+    "https://i.pinimg.com/1200x/0a/20/36/0a20368f07da659768b4f23a8925c380.jpg",
+    "https://i.pinimg.com/736x/a0/b6/70/a0b670d587ac05d46133ad94f152f9aa.jpg",
+    "https://i.pinimg.com/736x/28/69/91/286991244c2c5497b6b350fdf379b08f.jpg",
+    "https://i.pinimg.com/736x/63/30/bb/6330bb05392817474bd42eb3fb79649e.jpg",
+    "https://i.pinimg.com/736x/a5/7f/c9/a57fc965317a75a6ff6a212d6f5cbf5d.jpg",
+    "https://i.pinimg.com/736x/22/29/fc/2229fcfad6dd8eb478c121f3c2133969.jpg",
+    "https://i.pinimg.com/1200x/20/93/26/20932669f29c906fe04fb248285461b7.jpg",
+    "https://i.pinimg.com/736x/a2/1c/f6/a21cf6acabaaf413a48669d8a9e6de99.jpg",
+    "https://i.pinimg.com/736x/36/d6/78/36d678c1bc1b50312f4b1bb8fe329f2b.jpg",
+    "https://i.pinimg.com/1200x/8c/79/fa/8c79fa556c02a618c860d2fa640494b.jpg",
+    "https://i.pinimg.com/736x/1e/a0/f0/1ea0f0b37077119b204f72996568dc75.jpg",
+    "https://i.pinimg.com/736x/ad/fa/6c/adfa6c89a57a41a7c6f2b9876899e59d.jpg",
+    "https://i.pinimg.com/736x/26/0f/62/260f62b1f08fb7de0759a83c181e2cd4.jpg",
+    "https://i.pinimg.com/736x/6e/a5/ef/6ea5efee6cf0782d39c569f52422a552.jpg",
+    "https://i.pinimg.com/1200x/c1/74/32/c17432ce27ad48e7ffb2f51d2c3f32a7.jpg",
+    "https://i.pinimg.com/736x/12/65/04/1265041c5b9d37320d9b319be1242101.jpg",
+    "https://i.pinimg.com/736x/74/87/64/74876458c530dea3d98c5d3829a367e4.jpg",
+    "https://i.pinimg.com/736x/21/60/7e/21607e954b73eab2b6d14f74f22c9157.jpg",
+    "https://i.pinimg.com/736x/8c/95/10/8c9510c942d21031f863fdb1e89c4379.jpg",
+    "https://i.pinimg.com/736x/bd/be/5d/bdbe5d6b47496dc216ee33b20b40d5d9.jpg",
+    "https://i.pinimg.com/736x/43/33/43/4333439052671e2f027d4d43058c6436.jpg"
+    ];
+    
+    // Simpan data ke file JSON
+    try {
+        fs.writeFileSync(furinaProfilePath, JSON.stringify(furinaData, null, 2));
+        debugLog('File furina.json berhasil dibuat');
+    } catch (err) {
+        debugLog(`Error membuat file furina.json: ${err.message}`);
+    }
+}
+
+// Pastikan file owner.json ada
+if (!fs.existsSync(ownerFile)) {
+    try {
+        fs.writeFileSync(ownerFile, JSON.stringify([], null, 2));
+        debugLog('File owner.json dibuat');
+    } catch (err) {
+        debugLog(`Error membuat file owner.json: ${err.message}`);
+    }
+}
 
 // Pastikan file premium.json ada
 if (!fs.existsSync(premiumFile)) {
@@ -77,42 +215,6 @@ if (!fs.existsSync(premiumFile)) {
     } catch (err) {
         debugLog(`Error membuat file premium.json: ${err.message}`);
     }
-}
-
-// Fungsi untuk memulai server dan tunnel
-async function startServer() {
-    try {
-        // Mulai server HTTP
-        const server = app.listen(port, () => {
-            debugLog(`Server berjalan pada port ${port}`);
-        });
-        
-        // Mulai localtunnel
-        const tunnel = await localtunnel({ 
-            port: port,
-            subdomain: 'rezium-v2' // Opsional: custom subdomain jika tersedia
-        });
-        
-        tunnelUrl = tunnel.url;
-        debugLog(`Localtunnel aktif: ${tunnelUrl}`);
-        
-        // Handle tunnel close
-        tunnel.on('close', () => {
-            debugLog('Localtunnel ditutup');
-        });
-        
-        return { server, tunnelUrl };
-    } catch (error) {
-        debugLog(`Error memulai server/tunnel: ${error.message}`);
-        throw error;
-    }
-}
-
-// Fungsi untuk menghentikan tunnel (opsional)
-async function stopTunnel() {
-    // Localtunnel tidak memiliki fungsi stop built-in, 
-    // tunnel akan otomatis tertutup saat proses dihentikan
-    debugLog('Localtunnel akan otomatis tertutup');
 }
 
 // Fungsi untuk memeriksa apakah pengguna adalah owner
@@ -291,145 +393,6 @@ const getPremiumList = async () => {
     }
 };
 
-// Pinterest cache system
-const pinterestCache = new Map();
-// Bersihkan cache setiap jam
-setInterval(() => {
-    pinterestCache.clear();
-    debugLog('Pinterest cache dibersihkan');
-}, 3600000); // 1 jam
-
-// Atur logger untuk debugging
-const logger = Pino({
-    level: 'warn'
-});
-
-// Tambahkan logging ke console untuk debugging
-const debugLog = (message) => {
-    console.log(`[${new Date().toISOString()}] ${message}`);
-};
-
-// Gunakan direktori temporary sistem yang lebih aman
-const tempDir = path.join(os.tmpdir(), 'rezium-v2-temp');
-fs.ensureDirSync(tempDir);
-
-// Direktori untuk menyimpan file download
-const downloadDir = path.join(__dirname, 'downloads');
-fs.ensureDirSync(downloadDir);
-
-// Konstanta untuk fitur pp couple
-const PP_COUPLE_DIRECTORY = 'assets';
-const PP_COUPLE_FILE = 'couple-profile.json';
-
-// Konstanta untuk fitur Furina
-const FURINA_DIRECTORY = 'assets';
-const FURINA_FILE = 'furina.json';
-
-// Pastikan direktori assets ada
-try {
-    fs.ensureDirSync(PP_COUPLE_DIRECTORY);
-    debugLog('Direktori assets dibuat/ditemukan');
-} catch (err) {
-    debugLog(`Error membuat direktori assets: ${err.message}`);
-}
-
-// Cek apakah file couple-profile.json sudah ada
-const coupleProfilePath = path.join(PP_COUPLE_DIRECTORY, PP_COUPLE_FILE);
-if (!fs.existsSync(coupleProfilePath)) {
-    debugLog('File couple-profile.json tidak ditemukan, membuat file baru...');
-    
-    // Data pasangan gambar profil dengan link yang sama untuk male dan female
-    const coupleData = [
-        {
-            "male": "https://i.pinimg.com/736x/c4/a9/89/c4a98988a67525af11d2e09c5b7dd1c5.jpg",
-            "female": "https://i.pinimg.com/736x/79/af/2e/79af2e06e4e68880ea63e71a7d8418e3.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/f7/d7/90/f7d7906367e9eb059e6712aed573f38a.jpg",
-            "female": "https://i.pinimg.com/736x/50/9c/82/509c82063ce797c4695854c22625e883.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/e8/45/33/e84533ad1413f44e80ecaa88540300cf.jpg",
-            "female": "https://i.pinimg.com/736x/75/5a/b1/755ab149c23002243eaad6e60b559121.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/ad/68/66/ad6866cae7bc8c8fa30a86128571bc46.jpg",
-            "female": "https://i.pinimg.com/736x/9d/1b/b7/9d1bb7c94058bb41073114a94c749923.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/2a/4c/60/2a4c608c7a67e64a4c5f837898e1d709.jpg",
-            "female": "https://i.pinimg.com/736x/0e/34/55/0e34553b256312a334edbe6d4ee9b187.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/25/88/39/258839c975c9a0fcdaedf3d26f0f8649.jpg",
-            "female": "https://i.pinimg.com/736x/c4/6d/e7/c46de713a9b1749e0d1772c28d269673.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/e8/62/86/e86286508bd9f4f7de18a7dabccc63be.jpg",
-            "female": "https://i.pinimg.com/736x/d1/4f/19/d14f19599324e8d07f27b3e071e3f273.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/5f/4b/d8/5f4bd87d8bcf4e31210c57ed8c49128d.jpg",
-            "female": "https://i.pinimg.com/736x/74/c3/9c/74c39c868a1605c4899fe131c2434100.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/8d/e4/6e/8de46ec1edf8c4a3c8adebe777fe1c8a.jpg",
-            "female": "https://i.pinimg.com/736x/62/89/40/628940ec82555629754b0d69908402cf.jpg"
-        },
-        {
-            "male": "https://i.pinimg.com/736x/63/64/57/63645713e047c5f5fa687df57ba51963.jpg",
-            "female": "https://i.pinimg.com/736x/fe/f5/01/fef5017c678d7438ec0123d2abcf5e6b.jpg"
-        }
-    ];
-    
-    // Simpan data ke file JSON hanya jika belum ada
-    try {
-        fs.writeFileSync(coupleProfilePath, JSON.stringify(coupleData, null, 2));
-        debugLog('File couple-profile.json berhasil dibuat');
-    } catch (err) {
-        debugLog(`Error membuat file couple-profile.json: ${err.message}`);
-    }
-}
-
-// Cek apakah file furina.json sudah ada
-const furinaProfilePath = path.join(FURINA_DIRECTORY, FURINA_FILE);
-if (!fs.existsSync(furinaProfilePath)) {
-    debugLog('File furina.json tidak ditemukan, membuat file baru...');
-    
-    // Data gambar Furina yang lebih lengkap dan valid
-    const furinaData = [
-    "https://i.pinimg.com/736x/60/dd/63/60dd635177b5add9b112c4bfac471bdd.jpg",
-    "https://i.pinimg.com/736x/3e/ec/de/3eecde57a47183dd187899ad326bbbee.jpg",
-    "https://i.pinimg.com/736x/6d/6f/f4/6d6ff45a555f649b1434099f47ca48ce.jpg",
-    "https://i.pinimg.com/736x/24/a3/8c/24a38c289a1565af1a2b48de854cad17.jpg",
-    "https://i.pinimg.com/1200x/0a/20/36/0a20368f07da659768b4f23a8925c380.jpg",
-    "https://i.pinimg.com/736x/a0/b6/70/a0b670d587ac05d46133ad94f152f9aa.jpg",
-    "https://i.pinimg.com/736x/28/69/91/286991244c2c5497b6b350fdf379b08f.jpg",
-    "https://i.pinimg.com/736x/63/30/bb/6330bb05392817474bd42eb3fb79649e.jpg",
-    "https://i.pinimg.com/736x/a5/7f/c9/a57fc965317a75a6ff6a212d6f5cbf5d.jpg",
-    "https://i.pinimg.com/736x/22/29/fc/2229fcfad6dd8eb478c121f3c2133969.jpg",
-    "https://i.pinimg.com/1200x/20/93/26/20932669f29c906fe04fb248285461b7.jpg",
-    "https://i.pinimg.com/736x/a2/1c/f6/a21cf6acabaaf413a48669d8a9e6de99.jpg",
-    "https://i.pinimg.com/736x/36/d6/78/36d678c1bc1b50312f4b1bb8fe329f2b.jpg",
-    "https://i.pinimg.com/1200x/8c/79/fa/8c79fa556c02a618c8602d4fa640494b.jpg",
-    "https://i.pinimg.com/736x/1e/a0/f0/1ea0f0b37077119b204f72996568dc75.jpg",
-    "https://i.pinimg.com/736x/ad/fa/6c/adfa6c89a57a41a7c6f2b9876899e59d.jpg",
-    "https://i.pinimg.com/736x/26/0f/62/260f62b1f08fb7de0759a83c181e2cd4.jpg",
-    "https://i.pinimg.com/736x/6e/a5/ef/6ea5efee6cf0782d39c569f52422a552.jpg",
-    "https://i.pinimg.com/1200x/c1/74/32/c17432ce27ad48e7ffb2f51d2c3f32a7.jpg",
-    "https://i.pinimg.com/736x/12/65/04/1265041c5b9d37320d9b319be1242101.jpg",
-    "https://i.pinimg.com/736x/74/87/64/74876458c530dea3d98c5d3829a367e4.jpg"
-    ];
-    
-    // Simpan data ke file JSON
-    try {
-        fs.writeFileSync(furinaProfilePath, JSON.stringify(furinaData, null, 2));
-        debugLog('File furina.json berhasil dibuat');
-    } catch (err) {
-        debugLog(`Error membuat file furina.json: ${err.message}`);
-    }
-}
-
 // Fungsi untuk mendapatkan pasangan gambar profil secara acak
 const getCoupleProfilePictures = () => {
     try {
@@ -497,7 +460,7 @@ const getPinterestCookie = async () => {
     try {
         // Cookie dasar yang sering digunakan oleh Pinterest
         const baseCookies = [
-            '_auth=1; _b="AMZ1YzZmZDQxYjQxYjQxYjQxYjQxYjQxYjQx";',
+            '_auth=1; _b="AMZ1YzZmZDQxYjQxYjQxYjQxYjQxYjQx";',
             'sessionFunnelEventLogged=1; _pinterest_sess=TWc9PSZHam1iWjU0VG9TU1JZTzRmN1p6UWp0Nk5sM3JqVHlVU0p0a3B4N0x3PT0mZk9qV0xUa1ZQT0p6N3V1NzBpWnB1VnN0Yz1nPT0tJm1lc2s9MCZrY2g9PSZkYz0mc2R0PSZ0b2E9PSZ1cmw9aHR0cHMlM0ElMkYlMkZ3d3cucGludGVyZXN0LmNvbSUyRg==',
             'csrftoken=abc123; sessionid=abc123',
             '_pinterest_cm=1; _pinterest_ct=1; _pinterest_dm=1; _pinterest_gtm=1; _pinterest_utm=1'
@@ -542,29 +505,6 @@ const getPinterestCookie = async () => {
     }
 };
 
-// Fungsi untuk mendapatkan proxy acak (opsional)
-const getRandomProxy = async () => {
-    try {
-        // Daftar proxy publik (ganti dengan proxy Anda sendiri jika ada)
-        const proxies = [
-            'http://104.248.63.15:80',
-            'http://104.248.63.15:8080',
-            'http://104.248.63.15:3128',
-            'http://104.248.63.15:8888',
-            'http://104.248.63.15:8080'
-        ];
-        
-        if (proxies.length === 0) {
-            return null;
-        }
-        
-        return proxies[Math.floor(Math.random() * proxies.length)];
-    } catch (error) {
-        debugLog(`Error mendapatkan proxy: ${error.message}`);
-        return null;
-    }
-};
-
 // Fungsi untuk mengecek koneksi internet
 const checkInternetConnection = async () => {
     return new Promise((resolve) => {
@@ -591,70 +531,357 @@ const checkInternetConnection = async () => {
     });
 };
 
-// Fungsi untuk mengambil gambar dari URL Pinterest (DIPERBAIKI)
+// Fungsi untuk membersihkan session yang bermasalah
+async function clearSession() {
+    try {
+        debugLog('Membersihkan session yang mungkin bermasalah...');
+        if (fs.existsSync('session')) {
+            await fs.emptyDir('session');
+            debugLog('Folder session berhasil dibersihkan');
+        }
+    } catch (err) {
+        debugLog(`Error membersihkan session: ${err.message}`);
+    }
+}
+
+// Fungsi untuk memeriksa single instance
+async function checkSingleInstance() {
+    try {
+        if (fs.existsSync(INSTANCE_LOCK_FILE)) {
+            const lockData = fs.readFileSync(INSTANCE_LOCK_FILE, 'utf8');
+            const lockTime = parseInt(lockData);
+            
+            // Jika lock file masih baru (kurang dari 10 detik), anggap instance lain masih berjalan
+            // Tambahkan toleransi untuk proses restart
+            if (Date.now() - lockTime < 10000) {
+                debugLog('Instance lain sedang berjalan, keluar...');
+                process.exit(1);
+            } else {
+                debugLog('Lock file lama dihapus, melanjutkan proses...');
+                fs.unlinkSync(INSTANCE_LOCK_FILE);
+            }
+        }
+        
+        // Buat lock file baru
+        fs.writeFileSync(INSTANCE_LOCK_FILE, Date.now().toString());
+        
+        // Hapus lock file saat proses keluar
+        process.on('exit', () => {
+            try {
+                if (fs.existsSync(INSTANCE_LOCK_FILE)) {
+                    fs.unlinkSync(INSTANCE_LOCK_FILE);
+                    debugLog('Lock file dihapus');
+                }
+            } catch (err) {
+                debugLog(`Error menghapus lock file: ${err.message}`);
+            }
+        });
+    } catch (err) {
+        debugLog(`Error mengecek single instance: ${err.message}`);
+    }
+}
+
+// Fungsi untuk merestart bot jika terjadi error fatal
+const restartBot = async () => {
+    debugLog('Merestart bot...');
+    isRunning = false;
+    
+    if (sock) {
+        try {
+            // Hapus semua event listener
+            sock.ev.removeAllListeners();
+            
+            // Tutup koneksi
+            if (sock.ws) {
+                sock.ws.close();
+            }
+            
+            // Hapus referensi socket
+            sock = null;
+        } catch (err) {
+            debugLog(`Error menutup socket: ${err.message}`);
+        }
+    }
+    
+    // Hapus lock file untuk memungkinkan restart
+    try {
+        if (fs.existsSync(INSTANCE_LOCK_FILE)) {
+            fs.unlinkSync(INSTANCE_LOCK_FILE);
+            debugLog('Lock file dihapus untuk restart');
+        }
+    } catch (err) {
+        debugLog(`Error menghapus lock file untuk restart: ${err.message}`);
+    }
+    
+    // Tunggu sebentar sebelum memulai ulang
+    setTimeout(async () => {
+        try {
+            // Bersihkan session hanya jika error karena logged out
+            // Untuk error lainnya, jangan bersihkan session
+            // await clearSession();
+            
+            // Mulai bot kembali
+            await startBot();
+        } catch (err) {
+            debugLog(`Fatal error saat restart: ${err.message}`);
+            console.error(err.stack);
+            // Coba restart lagi setelah 10 detik
+            setTimeout(restartBot, 10000);
+        }
+    }, 5000);
+};
+
+// Fungsi untuk mengonversi gambar ke format stiker WebP
+async function convertToStickerNew(imageBuffer) {
+    try {
+        debugLog('Mengkonversi gambar ke stiker menggunakan metode buffer...');
+        
+        // Proses konversi langsung dari buffer tanpa file temporary
+        const webpBuffer = await sharp(imageBuffer)
+            .resize(512, 512, { 
+                fit: 'contain',
+                background: { r: 0, g: 0, b: 0, alpha: 0 }
+            })
+            .webp({ quality: 80 })
+            .toBuffer();
+        
+        debugLog(`Stiker berhasil dikonversi, ukuran: ${webpBuffer.length} bytes`);
+        return webpBuffer;
+    } catch (err) {
+        debugLog(`Error di convertToStickerNew: ${err.message}`);
+        
+        // Fallback ke metode lama jika metode baru gagal
+        debugLog('Mencoba metode fallback...');
+        return await convertToStickerFallback(imageBuffer);
+    }
+}
+
+// Fungsi fallback dengan penanganan file yang lebih aman
+async function convertToStickerFallback(imageBuffer) {
+    try {
+        debugLog('Menggunakan metode fallback dengan file temporary...');
+        
+        // Buat nama file unik
+        const timestamp = Date.now();
+        const randomId = Math.random().toString(36).substring(2, 15);
+        const inputPath = path.join(tempDir, `input-${timestamp}-${randomId}.jpg`);
+        const outputPath = path.join(tempDir, `output-${timestamp}-${randomId}.webp`);
+        
+        // Simpan buffer gambar ke file
+        await fs.writeFile(inputPath, imageBuffer);
+        
+        // Proses konversi
+        await sharp(inputPath)
+            .resize(512, 512, { 
+                fit: 'contain',
+                background: { r: 0, g: 0, b: 0, alpha: 0 }
+            })
+            .webp({ quality: 80 })
+            .toFile(outputPath);
+        
+        // Baca hasil konversi
+        const webpBuffer = await fs.readFile(outputPath);
+        
+        // Hapus file dengan delay untuk memastikan tidak digunakan
+        setTimeout(async () => {
+            try {
+                await fs.remove(inputPath);
+                debugLog(`File input dihapus: ${inputPath}`);
+            } catch (err) {
+                debugLog(`Error menghapus file input: ${err.message}`);
+            }
+        }, 1000);
+        
+        setTimeout(async () => {
+            try {
+                await fs.remove(outputPath);
+                debugLog(`File output dihapus: ${outputPath}`);
+            } catch (err) {
+                debugLog(`Error menghapus file output: ${err.message}`);
+            }
+        }, 2000);
+        
+        return webpBuffer;
+    } catch (err) {
+        debugLog(`Error di convertToStickerFallback: ${err.message}`);
+        throw err;
+    }
+}
+
+// Fungsi untuk membuat stiker dengan metadata
+async function convertToStickerWithMetadata(imageBuffer, packname, author) {
+    try {
+        debugLog('Mengkonversi gambar ke stiker dengan metadata...');
+        
+        // Konversi ke webp menggunakan sharp
+        const webpBuffer = await sharp(imageBuffer)
+            .resize(512, 512, { 
+                fit: 'contain',
+                background: { r: 0, g: 0, b: 0, alpha: 0 }
+            })
+            .webp({ quality: 80 })
+            .toBuffer();
+        
+        // Tambahkan metadata EXIF
+        const stickerWithMetadata = await writeExif({
+            mimetype: 'image/webp',
+            data: webpBuffer
+        }, {
+            packname,
+            author
+        });
+        
+        debugLog('Stiker dengan metadata berhasil dibuat');
+        return stickerWithMetadata;
+    } catch (err) {
+        debugLog(`Error membuat stiker dengan metadata: ${err.message}`);
+        throw err;
+    }
+}
+
+// Fungsi untuk membuat meme menggunakan Sharp
+async function createMeme(imageBuffer, topText = '', bottomText = '') {
+    try {
+        debugLog('Membuat meme dengan Sharp...');
+        
+        // Baca gambar dengan Sharp
+        const image = sharp(imageBuffer);
+        const metadata = await image.metadata();
+        
+        const width = metadata.width;
+        const height = metadata.height;
+        
+        // Buat SVG untuk teks atas
+        let topTextSvg = null;
+        if (topText) {
+            const fontSize = Math.floor(width / 15);
+            const strokeWidth = Math.max(2, Math.floor(fontSize / 10));
+            
+            topTextSvg = Buffer.from(`
+                <svg width="${width}" height="${height}">
+                    <style>
+                        .text {
+                            font-family: Arial, sans-serif;
+                            font-size: ${fontSize}px;
+                            font-weight: bold;
+                            fill: white;
+                            stroke: black;
+                            stroke-width: ${strokeWidth}px;
+                            text-anchor: middle;
+                        }
+                    </style>
+                    <text x="${width/2}" y="${fontSize * 1.2}" class="text">${topText.toUpperCase()}</text>
+                </svg>
+            `);
+        }
+        
+        // Buat SVG untuk teks bawah
+        let bottomTextSvg = null;
+        if (bottomText) {
+            const fontSize = Math.floor(width / 15);
+            const strokeWidth = Math.max(2, Math.floor(fontSize / 10));
+            
+            bottomTextSvg = Buffer.from(`
+                <svg width="${width}" height="${height}">
+                    <style>
+                        .text {
+                            font-family: Arial, sans-serif;
+                            font-size: ${fontSize}px;
+                            font-weight: bold;
+                            fill: white;
+                            stroke: black;
+                            stroke-width: ${strokeWidth}px;
+                            text-anchor: middle;
+                        }
+                    </style>
+                    <text x="${width/2}" y="${height - fontSize * 0.2}" class="text">${bottomText.toUpperCase()}</text>
+                </svg>
+            `);
+        }
+        
+        // Gabungkan gambar dengan teks
+        let result = image;
+        
+        if (topTextSvg) {
+            const topTextImage = sharp(topTextSvg);
+            result = result.composite([{ input: topTextImage, blend: 'over' }]);
+        }
+        
+        if (bottomTextSvg) {
+            const bottomTextImage = sharp(bottomTextSvg);
+            result = result.composite([{ input: bottomTextImage, blend: 'over' }]);
+        }
+        
+        // Konversi ke buffer
+        const buffer = await result.toBuffer();
+        
+        debugLog('Meme berhasil dibuat dengan Sharp');
+        return buffer;
+    } catch (err) {
+        debugLog(`Error membuat meme dengan Sharp: ${err.message}`);
+        throw err;
+    }
+}
+
+// Fungsi untuk menambahkan watermark pada gambar
+async function addWatermark(imageBuffer, watermarkText) {
+    try {
+        debugLog('Menambahkan watermark pada gambar...');
+        
+        // Baca gambar dengan Sharp
+        const image = sharp(imageBuffer);
+        const metadata = await image.metadata();
+        
+        const width = metadata.width;
+        const height = metadata.height;
+        
+        // Buat SVG untuk watermark
+        const fontSize = Math.floor(width / 15);
+        const strokeWidth = Math.max(2, Math.floor(fontSize / 10));
+        
+        const watermarkSvg = Buffer.from(`
+            <svg width="${width}" height="${height}">
+                <style>
+                    .text {
+                        font-family: Arial, sans-serif;
+                        font-size: ${fontSize}px;
+                        font-weight: bold;
+                        fill: rgba(255, 255, 255, 0.8);
+                        stroke: rgba(0, 0, 0, 0.8);
+                        stroke-width: ${strokeWidth}px;
+                        text-anchor: middle;
+                    }
+                </style>
+                <text x="${width/2}" y="${height - fontSize}" class="text">${watermarkText}</text>
+            </svg>
+        `);
+        
+        // Gabungkan gambar dengan watermark
+        const watermarkedImage = sharp(imageBuffer)
+            .composite([{
+                input: watermarkSvg,
+                blend: 'over'
+            }]);
+        
+        // Konversi ke buffer
+        const buffer = await watermarkedImage.toBuffer();
+        
+        debugLog('Watermark berhasil ditambahkan');
+        return buffer;
+    } catch (err) {
+        debugLog(`Error menambahkan watermark: ${err.message}`);
+        throw err;
+    }
+}
+
+// Fungsi untuk mengambil gambar dari URL Pinterest
 const getPinterestImage = async (url) => {
     try {
         debugLog(`Mengambil gambar dari Pinterest: ${url}`);
         
         // Coba beberapa metode untuk menemukan URL gambar
         
-        // Metode 1: Gunakan API Pinterest resmi (jika memungkinkan)
-        try {
-            debugLog('Mencoba API Pinterest resmi...');
-            
-            // Ekstrak ID pin dari URL
-            const pinIdMatch = url.match(/\/pin\/(\d+)/);
-            if (pinIdMatch && pinIdMatch[1]) {
-                const pinId = pinIdMatch[1];
-                
-                // Coba beberapa endpoint API
-                const apiEndpoints = [
-                    `https://api.pinterest.com/v3/pins/${pinId}/?access_token=YOUR_ACCESS_TOKEN`,
-                    `https://www.pinterest.com/resource/PinResource/get/?source_url=/pin/${pinId}/&data={"options":{"pin_id":"${pinId}"}}`
-                ];
-                
-                for (const apiUrl of apiEndpoints) {
-                    try {
-                        const response = await axios.get(apiUrl, {
-                            headers: {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                                'Accept': 'application/json',
-                                'Accept-Language': 'en-US,en;q=0.9',
-                                'Accept-Encoding': 'gzip, deflate, br',
-                                'Referer': 'https://www.pinterest.com/',
-                                'DNT': '1',
-                                'Connection': 'keep-alive'
-                            },
-                            timeout: 10000
-                        });
-                        
-                        if (response.data) {
-                            // Ekstrak URL gambar dari respons
-                            let imageUrl = null;
-                            
-                            if (response.data.image && response.data.image.url) {
-                                imageUrl = response.data.image.url;
-                            } else if (response.data.data && response.data.data.image && response.data.data.image.url) {
-                                imageUrl = response.data.data.image.url;
-                            } else if (response.data.resource_response && response.data.resource_response.data && response.data.resource_response.data.image && response.data.resource_response.data.image.url) {
-                                imageUrl = response.data.resource_response.data.image.url;
-                            }
-                            
-                            if (imageUrl) {
-                                debugLog(`URL gambar ditemukan dari API: ${imageUrl}`);
-                                return imageUrl;
-                            }
-                        }
-                    } catch (apiError) {
-                        debugLog(`Error dengan API ${apiUrl}: ${apiError.message}`);
-                    }
-                }
-            }
-        } catch (apiError) {
-            debugLog(`Error dengan API Pinterest: ${apiError.message}`);
-        }
-        
-        // Metode 2: Scraping dengan cookie
+        // Metode 1: Scraping dengan cookie
         try {
             debugLog('Mencoba scraping dengan cookie...');
             
@@ -662,7 +889,7 @@ const getPinterestImage = async (url) => {
             
             const headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
                 'Cache-Control': 'max-age=0',
@@ -750,127 +977,6 @@ const getPinterestImage = async (url) => {
             debugLog(`Error dengan scraping: ${scrapingError.message}`);
         }
         
-        // Metode 3: Gunakan layanan pihak ketiga
-        try {
-            debugLog('Mencoba layanan pihak ketiga...');
-            
-            const thirdPartyServices = [
-                {
-                    name: 'Pinterest Downloader API',
-                    url: `https://pinterestdownloader.com/api?url=${encodeURIComponent(url)}`,
-                    handler: (response) => {
-                        if (response.data && response.data.url) {
-                            return response.data.url;
-                        }
-                        return null;
-                    }
-                },
-                {
-                    name: 'Pinterest Video Downloader',
-                    url: `https://pinterestvideodownloader.com/download?url=${encodeURIComponent(url)}`,
-                    handler: (response) => {
-                        if (response.data && response.data.download_url) {
-                            return response.data.download_url;
-                        }
-                        return null;
-                    }
-                },
-                {
-                    name: 'SaveFrom API',
-                    url: `https://savefrom.net/api?url=${encodeURIComponent(url)}`,
-                    handler: (response) => {
-                        if (response.data && response.data.url) {
-                            return response.data.url;
-                        }
-                        return null;
-                    }
-                }
-            ];
-            
-            for (const service of thirdPartyServices) {
-                try {
-                    debugLog(`Mencoba layanan: ${service.name}`);
-                    
-                    const response = await axios.get(service.url, {
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                        },
-                        timeout: 15000
-                    });
-                    
-                    const imageUrl = service.handler(response);
-                    if (imageUrl) {
-                        debugLog(`URL gambar ditemukan dari ${service.name}: ${imageUrl}`);
-                        return imageUrl;
-                    }
-                } catch (serviceError) {
-                    debugLog(`Error dengan ${service.name}: ${serviceError.message}`);
-                }
-            }
-        } catch (thirdPartyError) {
-            debugLog(`Error dengan layanan pihak ketiga: ${thirdPartyError.message}`);
-        }
-        
-        // Metode 4: Gunakan browser automation (jika memungkinkan)
-        try {
-            debugLog('Mencoba browser automation...');
-            
-            // Ini hanya akan berfungsi jika puppeteer terinstal
-            // Anda perlu menginstalnya dengan: npm install puppeteer
-            try {
-                const puppeteer = require('puppeteer');
-                
-                const browser = await puppeteer.launch({
-                    headless: true,
-                    args: ['--no-sandbox', '--disable-setuid-sandbox']
-                });
-                
-                const page = await browser.newPage();
-                
-                // Set user agent dan viewport
-                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-                await page.setViewport({ width: 1366, height: 768 });
-                
-                // Navigasi ke URL
-                await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-                
-                // Tunggu beberapa detik untuk memastikan halaman dimuat sepenuhnya
-                await page.waitForTimeout(3000);
-                
-                // Coba dapatkan URL gambar dari berbagai sumber
-                const imageUrl = await page.evaluate(() => {
-                    // Cari og:image
-                    const ogImage = document.querySelector('meta[property="og:image"]');
-                    if (ogImage && ogImage.getAttribute('content')) {
-                        return ogImage.getAttribute('content');
-                    }
-                    
-                    // Cari gambar dengan kelas tertentu
-                    const imageElements = document.querySelectorAll('img');
-                    for (const img of imageElements) {
-                        const src = img.getAttribute('src');
-                        if (src && src.includes('i.pinimg.com') && (src.includes('originals') || src.includes('736x'))) {
-                            return src;
-                        }
-                    }
-                    
-                    return null;
-                });
-                
-                await browser.close();
-                
-                if (imageUrl) {
-                    debugLog(`URL gambar ditemukan dari browser automation: ${imageUrl}`);
-                    return imageUrl;
-                }
-            } catch (puppeteerError) {
-                debugLog(`Error dengan puppeteer: ${puppeteerError.message}`);
-                debugLog('Puppeteer tidak terinstal atau gagal dijalankan');
-            }
-        } catch (automationError) {
-            debugLog(`Error dengan browser automation: ${automationError.message}`);
-        }
-        
         throw new Error('Tidak dapat menemukan URL gambar dengan metode apa pun');
     } catch (error) {
         debugLog(`Error mengambil gambar Pinterest: ${error.message}`);
@@ -878,7 +984,7 @@ const getPinterestImage = async (url) => {
     }
 };
 
-// Fungsi untuk mengambil gambar dari URL dan mengubahnya menjadi buffer (SUPER DIPERBAIKI)
+// Fungsi untuk mengambil gambar dari URL dan mengubahnya menjadi buffer
 const getImageBuffer = async (url) => {
     try {
         // Jika URL adalah Pinterest, ambil URL gambar langsung
@@ -1024,408 +1130,9 @@ const getImageBuffer = async (url) => {
                 throw new Error('Semua CDN variant gagal');
             },
             
-            // Metode 3: Menggunakan proxy publik
+            // Metode 3: Fallback ke gambar placeholder
             async () => {
-                debugLog('Metode 3: Menggunakan proxy publik...');
-                
-                // Daftar proxy publik
-                const proxyList = [
-                    'http://104.248.63.15:80',
-                    'http://104.248.63.15:8080',
-                    'http://104.248.63.15:3128',
-                    'http://104.248.63.15:8888',
-                    'http://104.248.63.15:8080'
-                ];
-                
-                for (const proxyUrl of proxyList) {
-                    try {
-                        debugLog(`Mencoba proxy: ${proxyUrl}`);
-                        
-                        // Gunakan https-proxy-agent
-                        const { HttpsProxyAgent } = require('https-proxy-agent');
-                        const httpsAgent = new HttpsProxyAgent(proxyUrl);
-                        
-                        const response = await axios.get(url, {
-                            responseType: 'arraybuffer',
-                            headers: {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                                'Accept-Language': 'en-US,en;q=0.9',
-                                'Accept-Encoding': 'gzip, deflate, br',
-                                'Referer': 'https://www.pinterest.com/',
-                                'DNT': '1',
-                                'Connection': 'keep-alive'
-                            },
-                            httpsAgent: httpsAgent,
-                            timeout: 30000,
-                            proxy: false
-                        });
-                        
-                        // Validasi konten gambar
-                        const contentType = response.headers['content-type'];
-                        if (!contentType || !contentType.startsWith('image/')) {
-                            throw new Error('Konten yang diunduh bukan gambar');
-                        }
-                        
-                        // Buat buffer dari gambar
-                        const buffer = Buffer.from(response.data, 'binary');
-                        
-                        // Validasi ukuran gambar (minimal 1KB)
-                        if (buffer.length < 1024) {
-                            throw new Error('Ukuran gambar terlalu kecil');
-                        }
-                        
-                        // Coba proses dengan sharp untuk memastikan format valid
-                        try {
-                            await sharp(buffer).metadata();
-                        } catch (sharpError) {
-                            throw new Error(`Format gambar tidak valid: ${sharpError.message}`);
-                        }
-                        
-                        return {
-                            buffer: buffer,
-                            mimetype: contentType || 'image/jpeg'
-                        };
-                    } catch (proxyError) {
-                        debugLog(`Proxy gagal: ${proxyError.message}`);
-                    }
-                }
-                
-                throw new Error('Semua proxy gagal');
-            },
-            
-            // Metode 4: Menggunakan API pihak ketiga yang lebih andal
-            async () => {
-                debugLog('Metode 4: API pihak ketiga yang lebih andal...');
-                
-                const apiList = [
-                    {
-                        name: 'ImgProxy',
-                        url: `https://imgproxy.herokuapp.com/500x500,fit/${encodeURIComponent(url)}`,
-                        handler: async (apiUrl) => {
-                            const response = await axios.get(apiUrl, {
-                                responseType: 'arraybuffer',
-                                timeout: 20000
-                            });
-                            
-                            // Validasi konten gambar
-                            const contentType = response.headers['content-type'];
-                            if (!contentType || !contentType.startsWith('image/')) {
-                                throw new Error('Konten yang diunduh bukan gambar');
-                            }
-                            
-                            // Buat buffer dari gambar
-                            const buffer = Buffer.from(response.data, 'binary');
-                            
-                            // Validasi ukuran gambar (minimal 1KB)
-                            if (buffer.length < 1024) {
-                                throw new Error('Ukuran gambar terlalu kecil');
-                            }
-                            
-                            // Coba proses dengan sharp untuk memastikan format valid
-                            try {
-                                await sharp(buffer).metadata();
-                            } catch (sharpError) {
-                                throw new Error(`Format gambar tidak valid: ${sharpError.message}`);
-                            }
-                            
-                            return {
-                                buffer: buffer,
-                                mimetype: contentType || 'image/jpeg'
-                            };
-                        }
-                    },
-                    {
-                        name: 'AllOrigins',
-                        url: `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-                        handler: async (apiUrl) => {
-                            const response = await axios.get(apiUrl, {
-                                responseType: 'arraybuffer',
-                                timeout: 20000
-                            });
-                            
-                            // Validasi konten gambar
-                            const contentType = response.headers['content-type'];
-                            if (!contentType || !contentType.startsWith('image/')) {
-                                throw new Error('Konten yang diunduh bukan gambar');
-                            }
-                            
-                            // Buat buffer dari gambar
-                            const buffer = Buffer.from(response.data, 'binary');
-                            
-                            // Validasi ukuran gambar (minimal 1KB)
-                            if (buffer.length < 1024) {
-                                throw new Error('Ukuran gambar terlalu kecil');
-                            }
-                            
-                            // Coba proses dengan sharp untuk memastikan format valid
-                            try {
-                                await sharp(buffer).metadata();
-                            } catch (sharpError) {
-                                throw new Error(`Format gambar tidak valid: ${sharpError.message}`);
-                            }
-                            
-                            return {
-                                buffer: buffer,
-                                mimetype: contentType || 'image/jpeg'
-                            };
-                        }
-                    },
-                    {
-                        name: 'CodeTabs',
-                        url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-                        handler: async (apiUrl) => {
-                            const response = await axios.get(apiUrl, {
-                                responseType: 'arraybuffer',
-                                timeout: 20000
-                            });
-                            
-                            // Validasi konten gambar
-                            const contentType = response.headers['content-type'];
-                            if (!contentType || !contentType.startsWith('image/')) {
-                                throw new Error('Konten yang diunduh bukan gambar');
-                            }
-                            
-                            // Buat buffer dari gambar
-                            const buffer = Buffer.from(response.data, 'binary');
-                            
-                            // Validasi ukuran gambar (minimal 1KB)
-                            if (buffer.length < 1024) {
-                                throw new Error('Ukuran gambar terlalu kecil');
-                            }
-                            
-                            // Coba proses dengan sharp untuk memastikan format valid
-                            try {
-                                await sharp(buffer).metadata();
-                            } catch (sharpError) {
-                                throw new Error(`Format gambar tidak valid: ${sharpError.message}`);
-                            }
-                            
-                            return {
-                                buffer: buffer,
-                                mimetype: contentType || 'image/jpeg'
-                            };
-                        }
-                    },
-                    {
-                        name: 'ThingProxy',
-                        url: `https://thingproxy.freeboard.io/resize/${encodeURIComponent(url)}`,
-                        handler: async (apiUrl) => {
-                            const response = await axios.get(apiUrl, {
-                                responseType: 'arraybuffer',
-                                timeout: 20000
-                            });
-                            
-                            // Validasi konten gambar
-                            const contentType = response.headers['content-type'];
-                            if (!contentType || !contentType.startsWith('image/')) {
-                                throw new Error('Konten yang diunduh bukan gambar');
-                            }
-                            
-                            // Buat buffer dari gambar
-                            const buffer = Buffer.from(response.data, 'binary');
-                            
-                            // Validasi ukuran gambar (minimal 1KB)
-                            if (buffer.length < 1024) {
-                                throw new Error('Ukuran gambar terlalu kecil');
-                            }
-                            
-                            // Coba proses dengan sharp untuk memastikan format valid
-                            try {
-                                await sharp(buffer).metadata();
-                            } catch (sharpError) {
-                                throw new Error(`Format gambar tidak valid: ${sharpError.message}`);
-                            }
-                            
-                            return {
-                                buffer: buffer,
-                                mimetype: contentType || 'image/jpeg'
-                            };
-                        }
-                    },
-                    {
-                        name: 'ImageProxy',
-                        url: `https://images.weserv.nl/?url=${encodeURIComponent(url)}&w=500&h=500`,
-                        handler: async (apiUrl) => {
-                            const response = await axios.get(apiUrl, {
-                                responseType: 'arraybuffer',
-                                timeout: 20000
-                            });
-                            
-                            // Validasi konten gambar
-                            const contentType = response.headers['content-type'];
-                            if (!contentType || !contentType.startsWith('image/')) {
-                                throw new Error('Konten yang diunduh bukan gambar');
-                            }
-                            
-                            // Buat buffer dari gambar
-                            const buffer = Buffer.from(response.data, 'binary');
-                            
-                            // Validasi ukuran gambar (minimal 1KB)
-                            if (buffer.length < 1024) {
-                                throw new Error('Ukuran gambar terlalu kecil');
-                            }
-                            
-                            // Coba proses dengan sharp untuk memastikan format valid
-                            try {
-                                await sharp(buffer).metadata();
-                            } catch (sharpError) {
-                                throw new Error(`Format gambar tidak valid: ${sharpError.message}`);
-                            }
-                            
-                            return {
-                                buffer: buffer,
-                                mimetype: contentType || 'image/jpeg'
-                            };
-                        }
-                    }
-                ];
-                
-                for (const api of apiList) {
-                    try {
-                        debugLog(`Mencoba API: ${api.name}`);
-                        const result = await api.handler(api.url);
-                        return result;
-                    } catch (apiError) {
-                        debugLog(`API ${api.name} gagal: ${apiError.message}`);
-                    }
-                }
-                
-                throw new Error('Semua API pihak ketiga gagal');
-            },
-            
-            // Metode 5: Browser automation dengan Puppeteer
-            async () => {
-                debugLog('Metode 5: Browser automation dengan Puppeteer...');
-                
-                try {
-                    const puppeteer = require('puppeteer');
-                    
-                    const browser = await puppeteer.launch({
-                        headless: true,
-                        args: [
-                            '--no-sandbox',
-                            '--disable-setuid-sandbox',
-                            '--disable-dev-shm-usage',
-                            '--disable-accelerated-2d-canvas',
-                            '--no-first-run',
-                            '--no-zygote',
-                            '--disable-gpu'
-                        ]
-                    });
-                    
-                    const page = await browser.newPage();
-                    
-                    // Set user agent dan viewport
-                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-                    await page.setViewport({ width: 1366, height: 768 });
-                    
-                    // Set cookie
-                    await page.setCookie({
-                        name: '_auth',
-                        value: '1',
-                        domain: '.pinterest.com'
-                    });
-                    
-                    // Navigasi ke URL gambar
-                    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-                    
-                    // Tunggu gambar dimuat
-                    await page.waitForSelector('img', { timeout: 10000 });
-                    
-                    // Ambil gambar sebagai buffer
-                    const imageBuffer = await page.screenshot({
-                        type: 'png',
-                        encoding: 'binary'
-                    });
-                    
-                    await browser.close();
-                    
-                    // Validasi ukuran gambar (minimal 1KB)
-                    if (imageBuffer.length < 1024) {
-                        throw new Error('Ukuran gambar terlalu kecil');
-                    }
-                    
-                    return {
-                        buffer: Buffer.from(imageBuffer, 'binary'),
-                        mimetype: 'image/png'
-                    };
-                } catch (puppeteerError) {
-                    debugLog(`Puppeteer gagal: ${puppeteerError.message}`);
-                    throw puppeteerError;
-                }
-            },
-            
-            // Metode 6: Download langsung dengan Node.js https
-            async () => {
-                debugLog('Metode 6: Download langsung dengan Node.js https...');
-                
-                return new Promise((resolve, reject) => {
-                    const urlObj = new URL(url);
-                    const options = {
-                        hostname: urlObj.hostname,
-                        path: urlObj.pathname + urlObj.search,
-                        method: 'GET',
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.9',
-                            'Accept-Encoding': 'gzip, deflate, br',
-                            'Referer': 'https://www.pinterest.com/',
-                            'DNT': '1',
-                            'Connection': 'keep-alive'
-                        }
-                    };
-                    
-                    const req = https.request(options, (res) => {
-                        let data = [];
-                        
-                        res.on('data', (chunk) => {
-                            data.push(chunk);
-                        });
-                        
-                        res.on('end', async () => {
-                            try {
-                                const buffer = Buffer.concat(data);
-                                
-                                // Validasi ukuran gambar (minimal 1KB)
-                                if (buffer.length < 1024) {
-                                    throw new Error('Ukuran gambar terlalu kecil');
-                                }
-                                
-                                // Coba proses dengan sharp untuk memastikan format valid
-                                try {
-                                    await sharp(buffer).metadata();
-                                } catch (sharpError) {
-                                    throw new Error(`Format gambar tidak valid: ${sharpError.message}`);
-                                }
-                                
-                                resolve({
-                                    buffer: buffer,
-                                    mimetype: res.headers['content-type'] || 'image/jpeg'
-                                });
-                            } catch (error) {
-                                reject(error);
-                            }
-                        });
-                    });
-                    
-                    req.on('error', (error) => {
-                        reject(error);
-                    });
-                    
-                    req.setTimeout(15000, () => {
-                        req.destroy();
-                        reject(new Error('Request timeout'));
-                    });
-                    
-                    req.end();
-                });
-            },
-            
-            // Metode 7: Fallback ke gambar placeholder
-            async () => {
-                debugLog('Metode 7: Fallback ke gambar placeholder...');
+                debugLog('Metode 3: Fallback ke gambar placeholder...');
                 
                 try {
                     // Coba beberapa layanan placeholder
@@ -1516,7 +1223,7 @@ const getImageBuffer = async (url) => {
     }
 };
 
-// Fungsi untuk mencari gambar di Pinterest (DIPERBAIKI)
+// Fungsi untuk mencari gambar di Pinterest
 const searchPinterest = async (query, limit = 5) => {
     try {
         debugLog(`Mencari gambar Pinterest dengan query: ${query}`);
@@ -1946,137 +1653,7 @@ const sendPinterestResults = async (sock, from, results, query) => {
     }
 };
 
-// Fungsi untuk mencari gambar di Rule34
-const searchRule34 = async (query, limit = 5) => {
-    try {
-        debugLog(`Mencari gambar Rule34 dengan query: ${query}`);
-        
-        // Bersihkan query
-        const cleanQuery = query.trim().replace(/\s+/g, ' ');
-        
-        // API Rule34
-        const apiUrl = `https://api.rule34.xxx/index.php?page=dapi&s=post&q=index&json=1&limit=${limit}&tags=${encodeURIComponent(cleanQuery)}`;
-        
-        const response = await axios.get(apiUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout: 15000
-        });
-        
-        if (!response.data || response.data.length === 0) {
-            return [];
-        }
-        
-        // Format hasil
-        const results = response.data.map(post => ({
-            id: post.id,
-            file_url: post.file_url,
-            sample_url: post.sample_url,
-            preview_url: post.preview_url,
-            rating: post.rating,
-            width: post.width,
-            height: post.height,
-            tags: post.tags.split(' ')
-        }));
-        
-        debugLog(`Ditemukan ${results.length} hasil dari Rule34`);
-        return results;
-    } catch (error) {
-        debugLog(`Error pencarian Rule34: ${error.message}`);
-        return [];
-    }
-};
-
-// Fungsi untuk mengirim hasil pencarian Rule34
-const sendRule34Results = async (sock, from, results, query) => {
-    try {
-        // Batasi jumlah hasil yang dikirim
-        const sendLimit = Math.min(3, results.length);
-        
-        for (let i = 0; i < sendLimit; i++) {
-            try {
-                const result = results[i];
-                
-                // Kirim gambar
-                await sock.sendMessage(from, {
-                    image: { url: result.sample_url },
-                    caption: `🔞 *Rule34 Result*\nID: ${result.id}\nRating: ${result.rating.toUpperCase()}\nTags: ${result.tags.slice(0, 10).join(', ')}${result.tags.length > 10 ? '...' : ''}\n\nKetik .r34dl ${result.id} untuk mengunduh gambar asli`
-                });
-                
-                // Jeda untuk menghindari spam
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            } catch (imgError) {
-                debugLog(`Error mengirim gambar Rule34: ${imgError.message}`);
-            }
-        }
-        
-        // Kirim pesan informasi
-        await sock.sendMessage(from, { 
-            text: `💡 *Ketik .r34dl <ID> untuk mengunduh gambar asli*\nContoh: .r34dl ${results[0].id}`
-        });
-        
-    } catch (error) {
-        debugLog(`Error mengirim hasil Rule34: ${error.message}`);
-        throw error;
-    }
-};
-
-// Fungsi untuk mengunduh gambar Rule34 berdasarkan ID
-const getRule34Image = async (id) => {
-    try {
-        debugLog(`Mengunduh gambar Rule34 dengan ID: ${id}`);
-        
-        // Dapatkan info post
-        const apiUrl = `https://api.rule34.xxx/index.php?page=dapi&s=post&q=index&json=1&id=${id}`;
-        
-        const response = await axios.get(apiUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout: 15000
-        });
-        
-        if (!response.data || response.data.length === 0) {
-            throw new Error('Gambar tidak ditemukan');
-        }
-        
-        const post = response.data[0];
-        
-        // Unduh gambar
-        const imageResponse = await axios.get(post.file_url, {
-            responseType: 'arraybuffer',
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://rule34.xxx/'
-            },
-            timeout: 30000
-        });
-        
-        // Simpan gambar ke file temporary
-        const timestamp = Date.now();
-        const extension = post.file_url.split('.').pop().split('?')[0];
-        const outputPath = path.join(downloadDir, `rule34-${id}-${timestamp}.${extension}`);
-        
-        await fs.writeFile(outputPath, imageResponse.data);
-        
-        debugLog(`Gambar Rule34 berhasil disimpan ke: ${outputPath}`);
-        
-        return {
-            path: outputPath,
-            width: post.width,
-            height: post.height,
-            format: extension,
-            rating: post.rating,
-            tags: post.tags.split(' ')
-        };
-    } catch (error) {
-        debugLog(`Error mengunduh gambar Rule34: ${error.message}`);
-        throw error;
-    }
-};
-
-// Fungsi untuk mengambil gambar dari Pixiv (diperbaiki dengan API alternatif)
+// Fungsi untuk mengambil gambar dari Pixiv
 const getPixivImage = async (id) => {
     try {
         debugLog(`Mengambil gambar dari Pixiv ID: ${id}`);
@@ -2581,7 +2158,7 @@ const sendSearchResults = async (sock, from, results, query) => {
                 try {
                     await sock.sendMessage(from, {
                         image: { url: results[i].url },
-                        caption: `${results[i].title} (ID: ${results[i].id})`
+                        caption: `${results[i].title} (ID: ${result.id})`
                     });
                 } catch (imgError) {
                     debugLog(`Error mengirim preview gambar: ${imgError.message}`);
@@ -2595,53 +2172,894 @@ const sendSearchResults = async (sock, from, results, query) => {
     }
 };
 
-// Tambahkan flag untuk mencegah multiple instance
-let isRunning = false;
-let sock = null;
-
-// Fungsi untuk membersihkan session yang bermasalah
-async function cleanSession() {
+// Fungsi untuk download media dari berbagai platform (Alternatif)
+async function downloadFromSaveFrom(url) {
     try {
-        debugLog('Membersihkan session yang mungkin bermasalah...');
-        const sessionFiles = await fs.readdir('session');
-        for (const file of sessionFiles) {
-            if (file.endsWith('.json') || file.endsWith('.dat')) {
-                try {
-                    await fs.remove(path.join('session', file));
-                    debugLog(`File ${file} berhasil dihapus`);
-                } catch (e) {
-                    debugLog(`Gagal menghapus ${file}: ${e.message}`);
-                }
-            }
+        debugLog(`Mengunduh media dari URL: ${url}`);
+        
+        // Deteksi platform dan gunakan metode yang sesuai
+        if (url.includes('youtube.com') || url.includes('youtu.be')) {
+            return await downloadYouTube(url);
+        } else if (url.includes('instagram.com') || url.includes('instagr.am')) {
+            return await downloadInstagram(url);
+        } else if (url.includes('tiktok.com')) {
+            return await downloadTikTok(url);
+        } else if (url.includes('facebook.com') || url.includes('fb.watch')) {
+            return await downloadFacebook(url);
+        } else if (url.includes('twitter.com') || url.includes('x.com')) {
+            return await downloadTwitter(url);
+        } else {
+            return await downloadGeneric(url);
         }
-    } catch (err) {
-        debugLog(`Error saat membersihkan session: ${err.message}`);
+    } catch (error) {
+        debugLog(`Error download dari SaveFrom: ${error.message}`);
+        throw error;
     }
 }
 
-// Fungsi untuk merestart bot jika terjadi error fatal
-const restartBot = async () => {
-    debugLog('Merestart bot...');
-    isRunning = false;
-    
-    if (sock) {
+// Fungsi untuk download YouTube menggunakan play-dl
+async function downloadYouTube(url) {
+    try {
+        debugLog(`Mengunduh media dari YouTube: ${url}`);
+        
+        // Dapatkan info video
+        const videoInfo = await playdl.video_info(url);
+        const title = videoInfo.video_details.title;
+        const duration = videoInfo.video_details.duration_in_sec;
+        
+        // Batasi durasi maksimal 10 menit (600 detik)
+        if (duration > 600) {
+            throw new Error('Video terlalu panjang! Maksimal 10 menit.');
+        }
+        
+        // Pilih format video terbaik (video dan audio)
+        let format = videoInfo.format.find(f => f.has_video && f.has_audio);
+        
+        if (!format) {
+            // Jika tidak ada format dengan video dan audio, coba format video saja
+            format = videoInfo.format.find(f => f.has_video);
+            if (!format) {
+                throw new Error('Tidak dapat menemukan format video');
+            }
+        }
+        
+        // Download video
+        const stream = await playdl.stream(url, { quality: format.itag });
+        
+        const timestamp = Date.now();
+        const outputPath = path.join(downloadDir, `youtube-${timestamp}.mp4`);
+        
+        const writer = fs.createWriteStream(outputPath);
+        stream.stream.pipe(writer);
+        
+        await new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+        });
+        
+        // Baca file
+        const buffer = await fs.readFile(outputPath);
+        
+        return {
+            path: outputPath,
+            buffer: buffer,
+            mediaType: 'video',
+            mimetype: 'video/mp4',
+            title: title
+        };
+    } catch (error) {
+        debugLog(`Error download YouTube: ${error.message}`);
+        throw error;
+    }
+}
+
+// Fungsi untuk download Instagram
+async function downloadInstagram(url) {
+    try {
+        debugLog(`Mengunduh media dari Instagram: ${url}`);
+        
+        // Gunakan API alternatif
+        const apiUrl = `https://api.instapi.xyz/media?url=${encodeURIComponent(url)}`;
+        
+        const response = await axios.get(apiUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        if (!response.data || !response.data.success) {
+            throw new Error('Tidak dapat mengambil media dari Instagram');
+        }
+        
+        const mediaUrl = response.data.media_url;
+        
+        // Download media
+        const mediaResponse = await axios.get(mediaUrl, {
+            responseType: 'arraybuffer',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        // Tentukan tipe media
+        const contentType = mediaResponse.headers['content-type'];
+        let mediaType = 'image';
+        
+        if (contentType.includes('video')) {
+            mediaType = 'video';
+        }
+        
+        // Simpan ke file temporary
+        const timestamp = Date.now();
+        const extension = contentType.split('/')[1] || (mediaType === 'video' ? 'mp4' : 'jpg');
+        const outputPath = path.join(downloadDir, `instagram-${timestamp}.${extension}`);
+        
+        await fs.writeFile(outputPath, mediaResponse.data);
+        
+        return {
+            path: outputPath,
+            buffer: mediaResponse.data,
+            mediaType: mediaType,
+            mimetype: contentType,
+            title: 'Media Instagram'
+        };
+    } catch (error) {
+        debugLog(`Error download Instagram: ${error.message}`);
+        throw error;
+    }
+}
+
+// Fungsi untuk download TikTok
+async function downloadTikTok(url) {
+    try {
+        debugLog(`Mengunduh media dari TikTok: ${url}`);
+        
+        // Gunakan API alternatif
+        const apiUrl = `https://api.tikapi.io/public/download?url=${encodeURIComponent(url)}`;
+        
+        const response = await axios.get(apiUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        if (!response.data || !response.data.success || !response.data.video_url) {
+            throw new Error('Tidak dapat mengambil media dari TikTok');
+        }
+        
+        const videoUrl = response.data.video_url;
+        
+        // Download video
+        const videoResponse = await axios.get(videoUrl, {
+            responseType: 'arraybuffer',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        // Simpan ke file temporary
+        const timestamp = Date.now();
+        const outputPath = path.join(downloadDir, `tiktok-${timestamp}.mp4`);
+        
+        await fs.writeFile(outputPath, videoResponse.data);
+        
+        return {
+            path: outputPath,
+            buffer: videoResponse.data,
+            mediaType: 'video',
+            mimetype: 'video/mp4',
+            title: 'Video TikTok'
+        };
+    } catch (error) {
+        debugLog(`Error download TikTok: ${error.message}`);
+        throw error;
+    }
+}
+
+// Fungsi untuk download Facebook
+async function downloadFacebook(url) {
+    try {
+        debugLog(`Mengunduh media dari Facebook: ${url}`);
+        
+        // Gunakan API alternatif
+        const apiUrl = `https://fbdownloader.app/api/download?url=${encodeURIComponent(url)}`;
+        
+        const response = await axios.get(apiUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        if (!response.data || !response.data.success || !response.data.hd_url) {
+            throw new Error('Tidak dapat mengambil media dari Facebook');
+        }
+        
+        const videoUrl = response.data.hd_url;
+        
+        // Download video
+        const videoResponse = await axios.get(videoUrl, {
+            responseType: 'arraybuffer',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        // Simpan ke file temporary
+        const timestamp = Date.now();
+        const outputPath = path.join(downloadDir, `facebook-${timestamp}.mp4`);
+        
+        await fs.writeFile(outputPath, videoResponse.data);
+        
+        return {
+            path: outputPath,
+            buffer: videoResponse.data,
+            mediaType: 'video',
+            mimetype: 'video/mp4',
+            title: 'Video Facebook'
+        };
+    } catch (error) {
+        debugLog(`Error download Facebook: ${error.message}`);
+        throw error;
+    }
+}
+
+// Fungsi untuk download Twitter/X
+async function downloadTwitter(url) {
+    try {
+        debugLog(`Mengunduh media dari Twitter: ${url}`);
+        
+        // Gunakan API alternatif
+        const apiUrl = `https://api.twitter-downloader.com/download?url=${encodeURIComponent(url)}`;
+        
+        const response = await axios.get(apiUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        if (!response.data || !response.data.success || !response.data.download_url) {
+            throw new Error('Tidak dapat mengambil media dari Twitter');
+        }
+        
+        const mediaUrl = response.data.download_url;
+        
+        // Download media
+        const mediaResponse = await axios.get(mediaUrl, {
+            responseType: 'arraybuffer',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        // Tentukan tipe media
+        const contentType = mediaResponse.headers['content-type'];
+        let mediaType = 'image';
+        
+        if (contentType.includes('video')) {
+            mediaType = 'video';
+        }
+        
+        // Simpan ke file temporary
+        const timestamp = Date.now();
+        const extension = contentType.split('/')[1] || (mediaType === 'video' ? 'mp4' : 'jpg');
+        const outputPath = path.join(downloadDir, `twitter-${timestamp}.${extension}`);
+        
+        await fs.writeFile(outputPath, mediaResponse.data);
+        
+        return {
+            path: outputPath,
+            buffer: mediaResponse.data,
+            mediaType: mediaType,
+            mimetype: contentType,
+            title: 'Media Twitter'
+        };
+    } catch (error) {
+        debugLog(`Error download Twitter: ${error.message}`);
+        throw error;
+    }
+}
+
+// Fungsi untuk download dari platform lain (generik)
+async function downloadGeneric(url) {
+    try {
+        debugLog(`Mengunduh media dari platform generik: ${url}`);
+        
+        // Coba beberapa API alternatif
+        const apiUrls = [
+            `https://savefrom.net/api?url=${encodeURIComponent(url)}`,
+            `https://api.savefrom.net/savefrom.php?url=${encodeURIComponent(url)}`,
+            `https://savefrom.io/api?url=${encodeURIComponent(url)}`,
+            `https://downloader.quax-wsu.com/api?url=${encodeURIComponent(url)}`
+        ];
+        
+        let response = null;
+        let downloadUrl = null;
+        
+        // Coba setiap API
+        for (const apiUrl of apiUrls) {
+            try {
+                debugLog(`Mencoba API: ${apiUrl}`);
+                response = await axios.get(apiUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    },
+                    timeout: 15000
+                });
+                
+                if (response.data) {
+                    // Coba ekstrak URL download dari respons
+                    if (response.data.url) {
+                        downloadUrl = response.data.url;
+                    } else if (response.data.download_url) {
+                        downloadUrl = response.data.download_url;
+                    } else if (typeof response.data === 'string') {
+                        // Coba cari URL dalam string HTML
+                        const urlMatch = response.data.match(/https:\/\/[^"'\s]+/);
+                        if (urlMatch && urlMatch[0]) {
+                            downloadUrl = urlMatch[0];
+                        }
+                    }
+                    
+                    if (downloadUrl) {
+                        debugLog(`URL download ditemukan: ${downloadUrl}`);
+                        break;
+                    }
+                }
+            } catch (apiError) {
+                debugLog(`Error dengan API ${apiUrl}: ${apiError.message}`);
+            }
+        }
+        
+        if (!downloadUrl) {
+            throw new Error('Tidak dapat menemukan link download dari URL ini');
+        }
+        
+        // Download media
+        const mediaResponse = await axios.get(downloadUrl, {
+            responseType: 'arraybuffer',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': url
+            },
+            timeout: 30000
+        });
+        
+        // Tentukan tipe media
+        const contentType = mediaResponse.headers['content-type'];
+        let mediaType = 'video';
+        let mimetype = contentType;
+        
+        if (contentType.startsWith('image/')) {
+            mediaType = 'image';
+        } else if (contentType.startsWith('audio/')) {
+            mediaType = 'audio';
+        }
+        
+        // Simpan ke file temporary
+        const timestamp = Date.now();
+        const extension = contentType.split('/')[1] || 'mp4';
+        const outputPath = path.join(downloadDir, `generic-${timestamp}.${extension}`);
+        
+        await fs.writeFile(outputPath, mediaResponse.data);
+        
+        return {
+            path: outputPath,
+            buffer: mediaResponse.data,
+            mediaType: mediaType,
+            mimetype: mimetype,
+            title: 'Media dari SaveFrom'
+        };
+    } catch (error) {
+        debugLog(`Error download generik: ${error.message}`);
+        throw error;
+    }
+}
+
+// Fungsi untuk mencari gambar di Rule34 (DENGAN API KEY)
+const searchRule34 = async (query, limit = 5) => {
+    try {
+        debugLog(`Mencari gambar Rule34 dengan query: ${query}`);
+        
+        // Bersihkan query
+        const cleanQuery = query.trim().replace(/\s+/g, ' ');
+        
+        // API credentials
+        const apiKey = '715750a7d06d057dad3e899ccfc3a57e64d52967b2b0d8373ba0dae8f7a1133712fd5122874c74956fcf6f6c7245c6aa6a482b418b3b6a1f404fc682dcd3fe8d';
+        const userId = '5410178';
+        
+        // Coba endpoint JSON dengan autentikasi
+        const jsonParams = new URLSearchParams({
+            page: 'dapi',
+            s: 'post',
+            q: 'index',
+            json: '1',
+            limit: limit.toString(),
+            tags: cleanQuery,
+            api_key: apiKey,
+            user_id: userId
+        });
+        
+        const jsonUrl = `https://api.rule34.xxx/index.php?${jsonParams.toString()}`;
+        debugLog(`URL API Rule34 (JSON dengan autentikasi): ${jsonUrl}`);
+        
+        let response = await axios.get(jsonUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            },
+            timeout: 15000
+        });
+        
+        // Periksa apakah response.data ada
+        if (!response.data) {
+            debugLog('Tidak ada data yang diterima dari API Rule34');
+            return [];
+        }
+        
+        // Log struktur respons untuk debugging
+        debugLog(`Tipe data respons: ${typeof response.data}`);
+        if (typeof response.data === 'string') {
+            debugLog(`Respons string: ${response.data}`);
+        }
+        
+        // Handle berbagai format respons
+        let data = response.data;
+        
+        // Jika data adalah string, coba parse sebagai JSON
+        if (typeof data === 'string') {
+            try {
+                data = JSON.parse(data);
+                debugLog('Berhasil parse string sebagai JSON');
+            } catch (e) {
+                debugLog(`Gagal parse string sebagai JSON: ${e.message}`);
+                // Jika gagal parse, coba sebagai XML
+                return parseRule34XML(data);
+            }
+        }
+        
+        // Jika data bukan array, coba ekstrak array dari objek
+        if (!Array.isArray(data)) {
+            // Coba beberapa kemungkinan struktur objek
+            if (data.posts && Array.isArray(data.posts)) {
+                data = data.posts;
+                debugLog('Data ditemukan di properti posts');
+            } else if (data.data && Array.isArray(data.data)) {
+                data = data.data;
+                debugLog('Data ditemukan di properti data');
+            } else if (data.results && Array.isArray(data.results)) {
+                data = data.results;
+                debugLog('Data ditemukan di properti results');
+            } else if (data.post && Array.isArray(data.post)) {
+                data = data.post;
+                debugLog('Data ditemukan di properti post');
+            } else if (typeof data === 'object' && Object.keys(data).length > 0) {
+                // Cek apakah ada properti yang berisi array
+                let foundArray = false;
+                for (const key in data) {
+                    if (Array.isArray(data[key])) {
+                        data = data[key];
+                        foundArray = true;
+                        debugLog(`Data ditemukan di properti ${key}`);
+                        break;
+                    }
+                }
+                
+                // Jika tidak ada array, coba konversi ke array dengan satu elemen
+                if (!foundArray) {
+                    debugLog('Mengkonversi objek tunggal ke array');
+                    data = [data];
+                }
+            } else {
+                debugLog('Data dari API Rule34 bukan array dan tidak dapat dikonversi');
+                debugLog(`Struktur data: ${JSON.stringify(data, null, 2)}`);
+                
+                // Coba fallback ke XML
+                debugLog('Mencoba fallback ke endpoint XML...');
+                return await tryRule34XML(cleanQuery, limit);
+            }
+        }
+        
+        // Periksa apakah array kosong
+        if (data.length === 0) {
+            debugLog('Tidak ada hasil yang ditemukan dari API Rule34');
+            return [];
+        }
+        
+        // Format hasil
+        const results = data.map(post => ({
+            id: post.id,
+            file_url: post.file_url,
+            sample_url: post.sample_url,
+            preview_url: post.preview_url,
+            rating: post.rating,
+            width: post.width,
+            height: post.height,
+            tags: post.tags ? post.tags.split(' ') : []
+        }));
+        
+        debugLog(`Ditemukan ${results.length} hasil dari Rule34`);
+        return results;
+    } catch (error) {
+        debugLog(`Error pencarian Rule34: ${error.message}`);
+        
+        // Coba fallback ke XML
         try {
-            sock.ev.removeAllListeners();
-            sock.ws.close();
-        } catch (err) {
-            debugLog(`Error menutup socket: ${err.message}`);
+            debugLog('Mencoba fallback ke endpoint XML...');
+            const cleanQuery = query.trim().replace(/\s+/g, ' ');
+            return await tryRule34XML(cleanQuery, limit);
+        } catch (fallbackError) {
+            debugLog(`Error fallback ke XML: ${fallbackError.message}`);
+            return [];
+        }
+    }
+};
+
+// Fungsi untuk mencoba endpoint XML
+async function tryRule34XML(query, limit) {
+    const xmlParams = new URLSearchParams({
+        page: 'dapi',
+        s: 'post',
+        q: 'index',
+        limit: limit.toString(),
+        tags: query
+    });
+    
+    const xmlUrl = `https://api.rule34.xxx/index.php?${xmlParams.toString()}`;
+    debugLog(`URL API Rule34 (XML): ${xmlUrl}`);
+    
+    const response = await axios.get(xmlUrl, {
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        timeout: 15000
+    });
+    
+    if (response.data && typeof response.data === 'string') {
+        return parseRule34XML(response.data);
+    }
+    
+    return [];
+}
+
+// Fungsi untuk parsing XML dari Rule34
+function parseRule34XML(xmlString) {
+    try {
+        debugLog('Parsing XML response dari Rule34...');
+        
+        const results = [];
+        const postRegex = /<post\s+([^>]+)\/>/g;
+        let match;
+        
+        while ((match = postRegex.exec(xmlString)) !== null) {
+            const attributes = match[1];
+            const post = {};
+            
+            // Extract each attribute
+            const idMatch = attributes.match(/id="([^"]+)"/);
+            if (idMatch) post.id = idMatch[1];
+            
+            const fileUrlMatch = attributes.match(/file_url="([^"]+)"/);
+            if (fileUrlMatch) post.file_url = fileUrlMatch[1];
+            
+            const sampleUrlMatch = attributes.match(/sample_url="([^"]+)"/);
+            if (sampleUrlMatch) post.sample_url = sampleUrlMatch[1];
+            
+            const previewUrlMatch = attributes.match(/preview_url="([^"]+)"/);
+            if (previewUrlMatch) post.preview_url = previewUrlMatch[1];
+            
+            const ratingMatch = attributes.match(/rating="([^"]+)"/);
+            if (ratingMatch) post.rating = ratingMatch[1];
+            
+            const widthMatch = attributes.match(/width="([^"]+)"/);
+            if (widthMatch) post.width = parseInt(widthMatch[1]);
+            
+            const heightMatch = attributes.match(/height="([^"]+)"/);
+            if (heightMatch) post.height = parseInt(heightMatch[1]);
+            
+            const tagsMatch = attributes.match(/tags="([^"]+)"/);
+            if (tagsMatch) post.tags = tagsMatch[1].split(' ');
+            
+            results.push(post);
+        }
+        
+        debugLog(`Berhasil parsing ${results.length} post dari XML`);
+        return results;
+    } catch (error) {
+        debugLog(`Error parsing XML: ${error.message}`);
+        return [];
+    }
+}
+
+// Fungsi untuk mengirim hasil pencarian Rule34
+const sendRule34Results = async (sock, from, results, query) => {
+    try {
+        // Batasi jumlah hasil yang dikirim
+        const sendLimit = Math.min(3, results.length);
+        
+        for (let i = 0; i < sendLimit; i++) {
+            try {
+                const result = results[i];
+                
+                // Kirim gambar
+                await sock.sendMessage(from, {
+                    image: { url: result.sample_url },
+                    caption: `🔞 *Rule34 Result*\nID: ${result.id}\nRating: ${result.rating.toUpperCase()}\nTags: ${result.tags.slice(0, 10).join(', ')}${result.tags.length > 10 ? '...' : ''}\n\nKetik .r34dl ${result.id} untuk mengunduh gambar asli`
+                });
+                
+                // Jeda untuk menghindari spam
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            } catch (imgError) {
+                debugLog(`Error mengirim gambar Rule34: ${imgError.message}`);
+            }
+        }
+        
+        // Kirim pesan informasi
+        await sock.sendMessage(from, { 
+            text: `💡 *Ketik .r34dl <ID> untuk mengunduh gambar asli*\nContoh: .r34dl ${results[0].id}`
+        });
+        
+    } catch (error) {
+        debugLog(`Error mengirim hasil Rule34: ${error.message}`);
+        throw error;
+    }
+};
+
+// Fungsi untuk mengunduh gambar Rule34 berdasarkan ID (DIPERBAIKI)
+const getRule34Image = async (id) => {
+    try {
+        debugLog(`Mengunduh gambar Rule34 dengan ID: ${id}`);
+        
+        // API credentials
+        const apiKey = '715750a7d06d057dad3e899ccfc3a57e64d52967b2b0d8373ba0dae8f7a1133712fd5122874c74956fcf6f6c7245c6aa6a482b418b3b6a1f404fc682dcd3fe8d';
+        const userId = '5410178';
+        
+        // Coba endpoint JSON dengan autentikasi
+        const jsonParams = new URLSearchParams({
+            page: 'dapi',
+            s: 'post',
+            q: 'index',
+            json: '1',
+            id: id,
+            api_key: apiKey,
+            user_id: userId
+        });
+        
+        const jsonUrl = `https://api.rule34.xxx/index.php?${jsonParams.toString()}`;
+        debugLog(`URL API Rule34 (JSON dengan autentikasi): ${jsonUrl}`);
+        
+        let response = await axios.get(jsonUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            },
+            timeout: 15000
+        });
+        
+        // Periksa apakah response.data ada
+        if (!response.data) {
+            debugLog('Tidak ada data yang diterima dari API Rule34');
+            throw new Error('Gambar tidak ditemukan');
+        }
+        
+        // Handle berbagai format respons
+        let post = null;
+        
+        // Jika data adalah string, coba parse sebagai JSON
+        if (typeof response.data === 'string') {
+            try {
+                const parsedData = JSON.parse(response.data);
+                debugLog('Berhasil parse string sebagai JSON');
+                
+                if (Array.isArray(parsedData) && parsedData.length > 0) {
+                    post = parsedData[0];
+                } else if (typeof parsedData === 'object') {
+                    post = parsedData;
+                }
+            } catch (e) {
+                debugLog(`Gagal parse string sebagai JSON: ${e.message}`);
+                // Jika gagal parse, coba sebagai XML
+                return await tryRule34XMLDownload(id);
+            }
+        } else if (Array.isArray(response.data) && response.data.length > 0) {
+            post = response.data[0];
+        } else if (typeof response.data === 'object') {
+            post = response.data;
+        }
+        
+        if (!post) {
+            debugLog('Post tidak ditemukan dalam respons');
+            throw new Error('Gambar tidak ditemukan');
+        }
+        
+        // Validasi URL gambar
+        if (!post.file_url) {
+            debugLog('URL gambar tidak ditemukan dalam respons');
+            throw new Error('URL gambar tidak valid');
+        }
+        
+        debugLog(`Mengunduh gambar dari: ${post.file_url}`);
+        
+        // Unduh gambar
+        const imageResponse = await axios.get(post.file_url, {
+            responseType: 'arraybuffer',
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://rule34.xxx/'
+            },
+            timeout: 30000
+        });
+        
+        // Validasi konten gambar
+        const contentType = imageResponse.headers['content-type'];
+        if (!contentType || !contentType.startsWith('image/')) {
+            throw new Error('Konten yang diunduh bukan gambar');
+        }
+        
+        // Buat buffer dari gambar
+        const buffer = Buffer.from(imageResponse.data, 'binary');
+        
+        // Validasi ukuran gambar (minimal 1KB)
+        if (buffer.length < 1024) {
+            throw new Error('Ukuran gambar terlalu kecil');
+        }
+        
+        // Dapatkan metadata gambar
+        const metadata = await sharp(buffer).metadata();
+        debugLog(`Metadata gambar: ${metadata.width}x${metadata.height}, format: ${metadata.format}`);
+        
+        // Simpan gambar ke file temporary
+        const timestamp = Date.now();
+        const outputPath = path.join(downloadDir, `rule34-${id}-${timestamp}.${metadata.format || 'jpg'}`);
+        
+        await fs.writeFile(outputPath, buffer);
+        
+        debugLog(`Gambar Rule34 berhasil disimpan ke: ${outputPath}`);
+        
+        return {
+            path: outputPath,
+            width: metadata.width,
+            height: metadata.height,
+            format: metadata.format || 'jpg',
+            rating: post.rating || 'unknown',
+            tags: post.tags ? (Array.isArray(post.tags) ? post.tags : post.tags.split(' ')) : []
+        };
+    } catch (error) {
+        debugLog(`Error mengunduh gambar Rule34: ${error.message}`);
+        
+        // Coba fallback ke XML
+        try {
+            debugLog('Mencoba fallback ke endpoint XML...');
+            return await tryRule34XMLDownload(id);
+        } catch (fallbackError) {
+            debugLog(`Error fallback ke XML: ${fallbackError.message}`);
+            throw error; // Lempar error asli
+        }
+    }
+};
+
+// Fungsi untuk mencoba download via XML
+async function tryRule34XMLDownload(id) {
+    const xmlParams = new URLSearchParams({
+        page: 'dapi',
+        s: 'post',
+        q: 'index',
+        id: id
+    });
+    
+    const xmlUrl = `https://api.rule34.xxx/index.php?${xmlParams.toString()}`;
+    debugLog(`URL API Rule34 (XML): ${xmlUrl}`);
+    
+    const response = await axios.get(xmlUrl, {
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        timeout: 15000
+    });
+    
+    if (response.data && typeof response.data === 'string') {
+        const post = parseRule34XMLPost(response.data);
+        
+        if (post && post.file_url) {
+            debugLog(`Mengunduh gambar dari XML: ${post.file_url}`);
+            
+            // Unduh gambar
+            const imageResponse = await axios.get(post.file_url, {
+                responseType: 'arraybuffer',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': 'https://rule34.xxx/'
+                },
+                timeout: 30000
+            });
+            
+            // Validasi konten gambar
+            const contentType = imageResponse.headers['content-type'];
+            if (!contentType || !contentType.startsWith('image/')) {
+                throw new Error('Konten yang diunduh bukan gambar');
+            }
+            
+            // Buat buffer dari gambar
+            const buffer = Buffer.from(imageResponse.data, 'binary');
+            
+            // Validasi ukuran gambar (minimal 1KB)
+            if (buffer.length < 1024) {
+                throw new Error('Ukuran gambar terlalu kecil');
+            }
+            
+            // Dapatkan metadata gambar
+            const metadata = await sharp(buffer).metadata();
+            debugLog(`Metadata gambar: ${metadata.width}x${metadata.height}, format: ${metadata.format}`);
+            
+            // Simpan gambar ke file temporary
+            const timestamp = Date.now();
+            const outputPath = path.join(downloadDir, `rule34-${id}-${timestamp}.${metadata.format || 'jpg'}`);
+            
+            await fs.writeFile(outputPath, buffer);
+            
+            debugLog(`Gambar Rule34 berhasil disimpan ke: ${outputPath}`);
+            
+            return {
+                path: outputPath,
+                width: metadata.width,
+                height: metadata.height,
+                format: metadata.format || 'jpg',
+                rating: post.rating || 'unknown',
+                tags: post.tags || []
+            };
         }
     }
     
-    // Tunggu sebentar sebelum memulai ulang
-    setTimeout(() => {
-        startBot().catch(err => {
-            debugLog(`Fatal error saat restart: ${err.message}`);
-            console.error(err.stack);
-        });
-    }, 5000);
-};
+    throw new Error('Gagal mendapatkan data post dari XML');
+}
 
+// Fungsi untuk parsing single XML post
+function parseRule34XMLPost(xmlString) {
+    try {
+        debugLog('Parsing XML post dari Rule34...');
+        
+        const postRegex = /<post\s+([^>]+)\/>/;
+        const match = xmlString.match(postRegex);
+        
+        if (!match) {
+            debugLog('Tidak ditemukan tag post dalam XML');
+            return null;
+        }
+        
+        const attributes = match[1];
+        const post = {};
+        
+        // Extract each attribute
+        const idMatch = attributes.match(/id="([^"]+)"/);
+        if (idMatch) post.id = idMatch[1];
+        
+        const fileUrlMatch = attributes.match(/file_url="([^"]+)"/);
+        if (fileUrlMatch) post.file_url = fileUrlMatch[1];
+        
+        const sampleUrlMatch = attributes.match(/sample_url="([^"]+)"/);
+        if (sampleUrlMatch) post.sample_url = sampleUrlMatch[1];
+        
+        const previewUrlMatch = attributes.match(/preview_url="([^"]+)"/);
+        if (previewUrlMatch) post.preview_url = previewUrlMatch[1];
+        
+        const ratingMatch = attributes.match(/rating="([^"]+)"/);
+        if (ratingMatch) post.rating = ratingMatch[1];
+        
+        const widthMatch = attributes.match(/width="([^"]+)"/);
+        if (widthMatch) post.width = parseInt(widthMatch[1]);
+        
+        const heightMatch = attributes.match(/height="([^"]+)"/);
+        if (heightMatch) post.height = parseInt(heightMatch[1]);
+        
+        const tagsMatch = attributes.match(/tags="([^"]+)"/);
+        if (tagsMatch) post.tags = tagsMatch[1].split(' ');
+        
+        debugLog(`Berhasil parsing post dengan ID: ${post.id}`);
+        return post;
+    } catch (error) {
+        debugLog(`Error parsing XML post: ${error.message}`);
+        return null;
+    }
+}
+
+// Fungsi utama untuk memulai bot
 async function startBot() {
     // Cegah multiple instance
     if (isRunning) {
@@ -2652,6 +3070,9 @@ async function startBot() {
     
     try {
         debugLog('Memulai Rezium-V2 bot...');
+        
+        // Cek single instance
+        await checkSingleInstance();
         
         // Cek koneksi internet
         const isConnected = await checkInternetConnection();
@@ -2674,20 +3095,35 @@ async function startBot() {
         }
         
         const { state, saveCreds } = await useMultiFileAuthState('session');
+        const { version, isLatest } = await fetchLatestBaileysVersion();
         
-        // Hapus opsi printQRInTerminal yang sudah deprecated
         sock = makeWASocket({
+            version,
             logger,
-            auth: state,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, logger),
+            },
             browser: ['Rezium-V2', 'Chrome', '3.0'],
             markOnlineOnConnect: false,
-            syncFullHistory: false
+            syncFullHistory: false,
+            connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,
+            retryRequestDelayMs: 2000,
+            maxRetries: 5,
+            generateHighQualityLinkPreview: true,
+            shouldSyncHistoryMessage: () => false,
+            getMessage: async (key) => {
+                return {
+                    conversation: "hello"
+                };
+            }
         });
         
         // Handler untuk koneksi update
         sock.ev.on('connection.update', async (update) => {
             try {
-                const { connection, lastDisconnect, qr } = update;
+                const { connection, lastDisconnect, qr, isNewLogin } = update;
                 
                 if (qr) {
                     debugLog('QR code diterima, silakan scan dengan WhatsApp:');
@@ -2700,7 +3136,19 @@ async function startBot() {
                     
                     if (reason === DisconnectReason.loggedOut) {
                         debugLog('Device logged out, menghapus session dan mencoba ulang...');
-                        await cleanSession();
+                        await clearSession();
+                        return restartBot();
+                    } else if (reason === DisconnectReason.restartRequired) {
+                        debugLog('Restart required, merestart bot...');
+                        return restartBot();
+                    } else if (reason === DisconnectReason.timedOut) {
+                        debugLog('Connection timed out, mencoba koneksi ulang...');
+                        return restartBot();
+                    } else if (reason === 515) { // Stream error
+                        debugLog('Stream error, merestart bot...');
+                        return restartBot();
+                    } else if (reason === 440 || reason === DisconnectReason.connectionClosed) {
+                        debugLog('Connection closed atau conflict, mencoba koneksi ulang...');
                         return restartBot();
                     } else {
                         debugLog('Mencoba koneksi ulang dalam 5 detik...');
@@ -2708,21 +3156,26 @@ async function startBot() {
                     }
                 } else if (connection === 'open') {
                     debugLog('Rezium-V2 Terhubung!');
-                    
-                    // Tampilkan informasi tunnel jika tersedia
-                    if (tunnelUrl) {
-                        debugLog(`Bot dapat diakses melalui tunnel: ${tunnelUrl}`);
-                        await sock.sendMessage(sock.user.id, { 
-                            text: `🌐 Bot dapat diakses melalui tunnel: ${tunnelUrl}` 
-                        });
-                    }
+                }
+                
+                if (isNewLogin) {
+                    debugLog('Login baru terdeteksi');
                 }
             } catch (err) {
                 debugLog(`Error dalam connection.update handler: ${err.message}`);
             }
         });
         
+        // Simpan state session
         sock.ev.on('creds.update', saveCreds);
+        
+        // Simpan state secara berkala
+        setInterval(async () => {
+            if (sock && sock.authState && sock.authState.creds) {
+                await saveCreds();
+                debugLog('Session state saved');
+            }
+        }, 30000); // Simpan setiap 30 detik
         
         sock.ev.on('messages.upsert', async ({ messages }) => {
             try {
@@ -2731,6 +3184,71 @@ async function startBot() {
                 
                 const from = msg.key.remoteJid;
                 const type = Object.keys(msg.message)[0];
+                
+                // FITUR ANTI VIEW ONCE - DETEKSI DAN PROSES PESAN VIEW ONCE
+                if (antiViewOnceEnabled && (msg.message.viewOnceMessage || 
+                    msg.message.viewOnceMessageV2 || 
+                    msg.message.viewOnceMessageV2Extension)) {
+                    try {
+                        debugLog('Mendeteksi pesan view once');
+                        
+                        let viewOnceMsg;
+                        let messageType;
+                        
+                        // Identifikasi tipe pesan view once
+                        if (msg.message.viewOnceMessage) {
+                            viewOnceMsg = msg.message.viewOnceMessage.message;
+                            messageType = Object.keys(viewOnceMsg)[0];
+                        } else if (msg.message.viewOnceMessageV2) {
+                            viewOnceMsg = msg.message.viewOnceMessageV2.message;
+                            messageType = Object.keys(viewOnceMsg)[0];
+                        } else if (msg.message.viewOnceMessageV2Extension) {
+                            viewOnceMsg = msg.message.viewOnceMessageV2Extension.message;
+                            messageType = Object.keys(viewOnceMsg)[0];
+                        }
+                        
+                        if (!messageType || !viewOnceMsg) {
+                            debugLog('Tidak dapat mengidentifikasi tipe pesan view once');
+                            return;
+                        }
+                        
+                        debugLog(`Tipe pesan view once: ${messageType}`);
+                        
+                        // Hanya proses jika pesan adalah gambar atau video
+                        if (messageType === 'imageMessage' || messageType === 'videoMessage') {
+                            // Unduh media dari pesan view once
+                            const mediaMessage = viewOnceMsg[messageType];
+                            const stream = await downloadContentFromMessage(
+                                mediaMessage, 
+                                messageType.replace('Message', '')
+                            );
+                            
+                            let buffer = Buffer.from([]);
+                            for await (const chunk of stream) {
+                                buffer = Buffer.concat([buffer, chunk]);
+                            }
+                            
+                            // Kirim kembali sebagai pesan normal
+                            if (messageType === 'imageMessage') {
+                                await sock.sendMessage(from, {
+                                    image: buffer,
+                                    caption: `📸 *Anti View Once*\n\n${mediaMessage.caption || ''}`,
+                                    mentions: [msg.key.participant || msg.key.remoteJid]
+                                });
+                                debugLog('Gambar view once berhasil dikirim ulang');
+                            } else if (messageType === 'videoMessage') {
+                                await sock.sendMessage(from, {
+                                    video: buffer,
+                                    caption: `🎥 *Anti View Once*\n\n${mediaMessage.caption || ''}`,
+                                    mentions: [msg.key.participant || msg.key.remoteJid]
+                                });
+                                debugLog('Video view once berhasil dikirim ulang');
+                            }
+                        }
+                    } catch (err) {
+                        debugLog(`Error menangani pesan view once: ${err.message}`);
+                    }
+                }
                 
                 // Ambil teks pesan
                 let body = '';
@@ -2763,6 +3281,7 @@ async function startBot() {
 • .listpremium - Lihat daftar user premium (hanya owner utama)
 • .stiker - Buat stiker (kirim gambar dengan caption .stiker atau balas gambar dengan .stiker)
 • .smeme <teks_atas>|<teks_bawah> - Buat meme (kirim gambar dengan caption .smeme atau balas gambar dengan .smeme)
+• .wm <teks> - Tambahkan watermark pada stiker (balas stiker dengan .wm [teks])
 • .ppcouple - Gambar profil pasangan (pria & wanita)
 • .furina - Gambar acak Furina (Genshin Impact)
 • .pixiv <id/url> - Unduh gambar dari Pixiv (ID atau URL)
@@ -2779,6 +3298,9 @@ async function startBot() {
 • .tiktok [url] - Download video TikTok
 • .ig [url] - Download media Instagram
 • .play [query] - Cari dan download lagu dari YouTube
+• .savefrom [url] - Download media dari berbagai platform (Facebook, Instagram, dll)
+• .antiviewonce - Status fitur anti view once
+• .antiviewonce on/off - Mengaktifkan/menonaktifkan fitur (hanya owner)
 ━━━━━━━━━━━━━━━━
 © Rezium-V2 2023
                     `;
@@ -2810,26 +3332,108 @@ async function startBot() {
                     });
                 }
                 
+                // Handler untuk .antiviewonce
+                else if (body.toLowerCase() === '.antiviewonce') {
+                    const senderNumber = msg.key.participant || msg.key.remoteJid;
+                    
+                    // Cek apakah pengirim adalah owner
+                    const isSenderOwner = await isOwner(senderNumber);
+                    
+                    if (isSenderOwner) {
+                        // Jika owner, tampilkan status dan cara mengubahnya
+                        const status = antiViewOnceEnabled ? 'Aktif' : 'Nonaktif';
+                        await sock.sendMessage(from, { 
+                            text: `🔄 *Fitur Anti View Once*\n\nStatus: ${status}\n\nCara penggunaan:\n• .antiviewonce on - Mengaktifkan fitur\n• .antiviewonce off - Menonaktifkan fitur\n\nFitur ini secara otomatis mendeteksi dan mengirim ulang pesan view once (gambar/video) sebagai pesan normal.` 
+                        });
+                    } else {
+                        // Jika bukan owner, tampilkan informasi umum
+                        await sock.sendMessage(from, { 
+                            text: `🔄 *Fitur Anti View Once*\n\nFitur ini secara otomatis mendeteksi dan mengirim ulang pesan view once (gambar/video) sebagai pesan normal.\n\nStatus: ${antiViewOnceEnabled ? 'Aktif' : 'Nonaktif'}\n\nHanya owner yang dapat mengubah status fitur ini.` 
+                        });
+                    }
+                }
+                
+                // Handler untuk mengubah status fitur
+                else if (body.toLowerCase() === '.antiviewonce on' || body.toLowerCase() === '.antiviewonce off') {
+                    const senderNumber = msg.key.participant || msg.key.remoteJid;
+                    
+                    // Cek apakah pengirim adalah owner
+                    const isSenderOwner = await isOwner(senderNumber);
+                    if (!isSenderOwner) {
+                        await sock.sendMessage(from, { text: '❌ Hanya owner yang dapat mengubah status fitur ini!' });
+                        return;
+                    }
+                    
+                    // Ubah status fitur
+                    if (body.toLowerCase() === '.antiviewonce on') {
+                        antiViewOnceEnabled = true;
+                        await sock.sendMessage(from, { text: '✅ Fitur Anti View Once telah diaktifkan!' });
+                    } else {
+                        antiViewOnceEnabled = false;
+                        await sock.sendMessage(from, { text: '✅ Fitur Anti View Once telah dinonaktifkan!' });
+                    }
+                }
+                
                 // Handler untuk owner
                 else if (body.toLowerCase() === '.owner') {
                     try {
-                        const vcard = 'BEGIN:VCARD\n' +
+                        // Buat array untuk multiple kontak
+                        const contacts = [];
+                        
+                        // Kontak pertama
+                        const vcard1 = 'BEGIN:VCARD\n' +
                             'VERSION:3.0\n' +
-                            'FN:Owner\n' + // Nama kontak
-                            'ORG:Ajarher;\n' + // Organisasi
-                            'TEL;type=CELL;type=VOICE;waid=6287841109073:+62 878-4110-9073\n' + // Nomor WhatsApp,
+                            'FN:AjarHer V2\n' + // Nama kontak pertama
+                            'ORG:AjarHer;\n' + // Organisasi
+                            'TEL;type=CELL;type=VOICE;waid=6287841109073:+62 878-4110-9073\n' + // Nomor WhatsApp
+                            'END:VCARD';
+                        
+                        // Kontak kedua
+                        const vcard2 = 'BEGIN:VCARD\n' +
+                            'VERSION:3.0\n' +
+                            'FN:チリ - Witch\n' + // Nama kontak kedua
+                            'ORG:Witch;\n' + // Organisasi
                             'TEL;type=CELL;type=VOICE;waid=6285765562855:+62 857-6556-2855\n' + // Nomor WhatsApp
                             'END:VCARD';
                             
+                        // Kontak ketiga (Zikro)
+                        const vcard3 = 'BEGIN:VCARD\n' +
+                            'VERSION:3.0\n' +
+                            'FN:Zikro\n' + // Nama kontak ketiga
+                            'ORG:Zikro;\n' + // Organisasi
+                            'TEL;type=CELL;type=VOICE;waid=6281389093716:+62 813-8909-3716\n' + // Nomor WhatsApp
+                            'END:VCARD';
+                        // Kontak keempat (L E T N A N)
+                        const vcard4 = 'BEGIN:VCARD\n' +
+                            'VERSION:3.0\n' +
+                            'FN:L E T N A N\n' + // Nama kontak keempat
+                            'ORG:L E T N A N;\n' + // Organisasi
+                            'TEL;type=CELL;type=VOICE;waid=6285831329707:+62 858-3132-9707\n' + // Nomor WhatsApp
+                            'END:VCARD';
+                        // Kontak kelima (Rezou)
+                        const vcard5 = 'BEGIN:VCARD\n' +
+                            'VERSION:3.0\n' +
+                            'FN:Rezou\n' + // Nama kontak kelima
+                            'ORG:Rezou;\n' + // Organisasi
+                            'TEL;type=CELL;type=VOICE;waid=6283823171840:+62 838-2317-1840\n' + // Nomor WhatsApp
+                            'END:VCARD';
+                        
+                        // Tambahkan semua kontak ke array
+                        contacts.push({ vcard: vcard1 });
+                        contacts.push({ vcard: vcard2 });
+                        contacts.push({ vcard: vcard3 });
+                        contacts.push({ vcard: vcard4 });
+                        contacts.push({ vcard: vcard5 });
+                        
                         await sock.sendMessage(from, {
                             contacts: {
-                                displayName: 'Owner',
-                                contacts: [{ vcard }]
+                                displayName: 'Owner Rezium-V2', // Nama tampilan untuk grup kontak
+                                contacts: contacts
                             }
                         });
                         
                         // Kirim pesan teks juga
-                        await sock.sendMessage(from, { text: '👤 Ini adalah kontak owner Rezium-V2. Silakan hubungi jika ada pertanyaan.' });
+                        await sock.sendMessage(from, { text: '👤 Ini adalah kontak owner REZIUM V2. Silakan hubungi jika ada pertanyaan.' });
                         
                         debugLog('Kontak owner berhasil dikirim!');
                     } catch (err) {
@@ -3255,6 +3859,73 @@ async function startBot() {
                     }
                 }
                 
+                // Handler untuk watermark stiker (DIPERBAIKI)
+                else if (body.toLowerCase().startsWith('.wm ')) {
+                    const watermarkText = body.substring(4).trim();
+                    
+                    if (!watermarkText) {
+                        await sock.sendMessage(from, { text: '❌ Silakan berikan teks watermark!\nContoh: .wm @ReziumV2' });
+                        return;
+                    }
+                    
+                    // Periksa apakah pesan adalah balasan ke stiker
+                    if (type === 'extendedTextMessage' && msg.message.extendedTextMessage.contextInfo) {
+                        const quotedMessage = msg.message.extendedTextMessage.contextInfo.quotedMessage;
+                        
+                        if (quotedMessage && quotedMessage.stickerMessage) {
+                            try {
+                                debugLog('Memproses watermark stiker...');
+                                
+                                // Buat objek pesan dari quoted message
+                                const quotedMsg = {
+                                    key: {
+                                        remoteJid: from,
+                                        id: msg.message.extendedTextMessage.contextInfo.stanzaId,
+                                        fromMe: msg.message.extendedTextMessage.contextInfo.participant === sock.user.id,
+                                        participant: msg.message.extendedTextMessage.contextInfo.participant
+                                    },
+                                    message: quotedMessage
+                                };
+                                
+                                // Unduh stiker
+                                const stickerBuffer = await downloadMediaMessage(quotedMsg, 'buffer', {}, {
+                                    logger,
+                                    reuploadRequest: sock.updateMediaMessage
+                                });
+                                
+                                // Konversi stiker ke gambar
+                                const imageBuffer = await sharp(stickerBuffer)
+                                    .toFormat('png')
+                                    .toBuffer();
+                                
+                                // Tambahkan watermark
+                                const watermarkedBuffer = await addWatermark(imageBuffer, watermarkText);
+                                
+                                // Konversi ke stiker dengan metadata
+                                const stickerWithMetadata = await convertToStickerWithMetadata(
+                                    watermarkedBuffer, 
+                                    'Rezium-V2', 
+                                    'Bot'
+                                );
+                                
+                                // Kirim stiker dengan watermark dan metadata
+                                await sock.sendMessage(from, {
+                                    sticker: stickerWithMetadata
+                                });
+                                
+                                debugLog('Stiker dengan watermark berhasil dikirim!');
+                            } catch (err) {
+                                debugLog(`Error membuat watermark stiker: ${err.message}`);
+                                await sock.sendMessage(from, { text: `❌ Gagal membuat watermark stiker: ${err.message}` });
+                            }
+                        } else {
+                            await sock.sendMessage(from, { text: '❌ Silakan balas stiker yang ingin diberi watermark!' });
+                        }
+                    } else {
+                        await sock.sendMessage(from, { text: '❌ Silakan balas stiker dengan perintah .wm [teks]!' });
+                    }
+                }
+                
                 // Handler untuk membuat meme
                 else if (body.toLowerCase().startsWith('.smeme ')) {
                     const text = body.substring(7).trim();
@@ -3631,7 +4302,69 @@ async function startBot() {
                     }
                 }
                 
-                // Play and download from YouTube (PERBAIKAN UTAMA)
+                // Handler untuk SaveFrom (PERBAIKAN)
+                else if (body.toLowerCase().startsWith('.savefrom ')) {
+                    const url = body.substring(10).trim();
+                    debugLog(`Memproses savefrom dengan URL: ${url}`);
+                    
+                    if (!url || !url.startsWith('http')) {
+                        await sock.sendMessage(from, { 
+                            text: '❌ URL tidak valid!\nContoh: .savefrom https://www.facebook.com/watch/?v=123456789' 
+                        });
+                        return;
+                    }
+                    
+                    try {
+                        await sock.sendMessage(from, { text: '⏳ Sedang mendownload media...' });
+                        
+                        // Download media - hapus parameter body
+                        const mediaInfo = await downloadFromSaveFrom(url);
+                        
+                        // Cek ukuran file
+                        const fileSizeInMB = mediaInfo.buffer.length / (1024 * 1024);
+                        if (fileSizeInMB > 16) {
+                            await fs.remove(mediaInfo.path);
+                            await sock.sendMessage(from, { text: '❌ Ukuran file terlalu besar! Maksimal 16MB.' });
+                            return;
+                        }
+                        
+                        // Kirim media sesuai tipe
+                        if (mediaInfo.mediaType === 'image') {
+                            await sock.sendMessage(from, {
+                                image: mediaInfo.buffer,
+                                caption: `📷 ${mediaInfo.title}`
+                            });
+                        } else if (mediaInfo.mediaType === 'audio') {
+                            await sock.sendMessage(from, {
+                                audio: mediaInfo.buffer,
+                                mimetype: mediaInfo.mimetype,
+                                ptt: false
+                            });
+                        } else {
+                            await sock.sendMessage(from, {
+                                video: mediaInfo.buffer,
+                                caption: `🎬 ${mediaInfo.title}`
+                            });
+                        }
+                        
+                        // Hapus file
+                        setTimeout(async () => {
+                            try {
+                                await fs.remove(mediaInfo.path);
+                                debugLog(`File SaveFrom dihapus: ${mediaInfo.path}`);
+                            } catch (err) {
+                                debugLog(`Error menghapus file SaveFrom: ${err.message}`);
+                            }
+                        }, 5000);
+                        
+                        debugLog(`Media SaveFrom berhasil dikirim! Tipe: ${mediaInfo.mediaType}`);
+                    } catch (err) {
+                        debugLog(`Error download dari SaveFrom: ${err.message}`);
+                        await sock.sendMessage(from, { text: `❌ Gagal mendownload media: ${err.message}` });
+                    }
+                }
+                
+                // Play and download from YouTube (MENGGUNAKAN COBALT TOOLS - VERSI UPDATE)
                 else if (body.toLowerCase().startsWith('.play ')) {
                     const query = body.substring(6).trim();
                     debugLog(`Memproses play dengan query: ${query}`);
@@ -3644,103 +4377,24 @@ async function startBot() {
                     try {
                         await sock.sendMessage(from, { text: '⏳ Sedang mencari lagu...' });
                         
-                        // Coba beberapa metode pencarian
-                        let video = null;
-                        let searchError = null;
+                        // Cari video dengan yt-search
+                        const searchResults = await ytSearch(query);
                         
-                        // Metode 1: play-dl
-                        try {
-                            debugLog('Mencoba pencarian dengan play-dl...');
-                            const searchResults = await playdl.search(query, {
-                                limit: 1,
-                                source: { youtube: 'video' }
-                            });
-                            
-                            if (searchResults.length > 0) {
-                                video = searchResults[0];
-                                debugLog(`Hasil pencarian (play-dl): ${video.title}`);
-                            }
-                        } catch (err) {
-                            searchError = err;
-                            debugLog(`Error dengan play-dl: ${err.message}`);
-                        }
-                        
-                        // Metode 2: ytdl-core jika play-dl gagal
-                        if (!video) {
-                            try {
-                                debugLog('Mencoba pencarian dengan ytdl-core...');
-                                const searchResults = await ytdl.search(query, {
-                                    limit: 1,
-                                    type: 'video'
-                                });
-                                
-                                if (searchResults.length > 0) {
-                                    video = {
-                                        id: searchResults[0].id,
-                                        title: searchResults[0].title,
-                                        duration: searchResults[0].duration
-                                    };
-                                    debugLog(`Hasil pencarian (ytdl-core): ${video.title}`);
-                                }
-                            } catch (err) {
-                                debugLog(`Error dengan ytdl-core: ${err.message}`);
-                            }
-                        }
-                        
-                        if (!video) {
-                            await sock.sendMessage(from, { text: `❌ Tidak ditemukan hasil untuk pencarian tersebut. Error: ${searchError?.message || 'Unknown error'}` });
+                        if (!searchResults || !searchResults.videos || searchResults.videos.length === 0) {
+                            await sock.sendMessage(from, { text: '❌ Tidak ditemukan hasil untuk pencarian tersebut.' });
                             return;
                         }
                         
-                        // Gunakan ID video untuk membuat URL yang valid
-                        const videoId = video.id;
-                        const url = `https://www.youtube.com/watch?v=${videoId}`;
+                        // Ambil video pertama
+                        const video = searchResults.videos[0];
+                        const videoId = video.videoId;
+                        const url = video.url;
                         const title = video.title;
+                        const duration = video.duration.seconds;
+                        
+                        debugLog(`Hasil pencarian: ${title} (${videoId})`);
                         
                         await sock.sendMessage(from, { text: `🎵 Ditemukan: ${title}\n⏳ Sedang mendownload...` });
-                        
-                        // Coba beberapa metode untuk mendapatkan info video
-                        let info = null;
-                        let infoError = null;
-                        
-                        // Metode 1: ytdl-core
-                        try {
-                            debugLog('Mendapatkan info video dengan ytdl-core...');
-                            info = await ytdl.getInfo(url, {
-                                requestOptions: {
-                                    headers: {
-                                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                                    }
-                                }
-                            });
-                        } catch (err) {
-                            infoError = err;
-                            debugLog(`Error mendapatkan info dengan ytdl-core: ${err.message}`);
-                        }
-                        
-                        // Metode 2: play-dl jika ytdl-core gagal
-                        if (!info) {
-                            try {
-                                debugLog('Mendapatkan info video dengan play-dl...');
-                                const videoDetails = await playdl.video_info(url);
-                                info = {
-                                    videoDetails: {
-                                        title: videoDetails.video_details.title,
-                                        lengthSeconds: videoDetails.video_details.duration_in_sec,
-                                        formats: videoDetails.format
-                                    }
-                                };
-                            } catch (err) {
-                                debugLog(`Error mendapatkan info dengan play-dl: ${err.message}`);
-                            }
-                        }
-                        
-                        if (!info) {
-                            await sock.sendMessage(from, { text: `❌ Gagal mendapatkan info video. Error: ${infoError?.message || 'Unknown error'}` });
-                            return;
-                        }
-                        
-                        const duration = parseInt(info.videoDetails.lengthSeconds);
                         
                         // Batasi durasi maksimal 10 menit (600 detik)
                         if (duration > 600) {
@@ -3748,149 +4402,264 @@ async function startBot() {
                             return;
                         }
                         
-                        // Pilih format audio terbaik
-                        let audioFormat = null;
+                        let downloadSuccess = false;
+                        let downloadError = null;
                         
-                        if (info.formats) {
-                            // Dari ytdl-core
-                            const audioFormats = ytdl.filterFormats(info.formats, 'audioonly');
-                            if (audioFormats.length > 0) {
-                                audioFormat = audioFormats[0];
-                            }
-                        } else if (info.videoDetails.formats) {
-                            // Dari play-dl
-                            const audioFormats = info.videoDetails.formats.filter(format => 
-                                format.mimeType && format.mimeType.includes('audio')
-                            );
-                            if (audioFormats.length > 0) {
-                                audioFormat = audioFormats[0];
-                            }
-                        }
-                        
-                        if (!audioFormat) {
-                            await sock.sendMessage(from, { text: '❌ Tidak dapat menemukan format audio untuk lagu ini!' });
-                            return;
-                        }
-                        
-                        // Simpan ke file temporary
-                        const timestamp = Date.now();
-                        const outputPath = path.join(downloadDir, `${timestamp}.mp3`);
-                        
-                        // Download dengan metode yang sesuai
+                        // Metode 1: Cobalt Tools API (utama)
                         try {
-                            if (audioFormat.url) {
-                                // Jika ada URL langsung, gunakan axios
-                                debugLog('Mendownload dengan axios...');
-                                const response = await axios({
-                                    method: 'GET',
-                                    url: audioFormat.url,
-                                    responseType: 'stream',
+                            debugLog('Mencoba download dengan Cobalt Tools API...');
+                            
+                            // API Cobalt Tools
+                            const cobaltApiUrl = 'https://api.cobalt.tools/api/json';
+                            
+                            // Request ke Cobalt API
+                            const response = await axios.post(cobaltApiUrl, {
+                                url: url,
+                                downloadMode: 'audio',
+                                audioFormat: 'mp3',
+                                quality: 'highest'
+                            }, {
+                                headers: {
+                                    'Accept': 'application/json',
+                                    'Content-Type': 'application/json',
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                                },
+                                timeout: 60000 // 60 detik timeout
+                            });
+                            
+                            debugLog(`Cobalt API response status: ${response.status}`);
+                            
+                            if (response.data && response.data.url) {
+                                debugLog(`Cobalt API response data: ${JSON.stringify(response.data)}`);
+                                
+                                // Download dari URL yang diberikan Cobalt
+                                const audioResponse = await axios.get(response.data.url, {
+                                    responseType: 'arraybuffer',
                                     headers: {
-                                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                                    }
+                                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                                        'Referer': 'https://cobalt.tools/'
+                                    },
+                                    timeout: 120000 // 120 detik timeout untuk download
                                 });
                                 
-                                const writer = fs.createWriteStream(outputPath);
-                                response.data.pipe(writer);
+                                const buffer = Buffer.from(audioResponse.data, 'binary');
+                                const fileSizeInMB = buffer.length / (1024 * 1024);
                                 
-                                await new Promise((resolve, reject) => {
-                                    writer.on('finish', resolve);
-                                    writer.on('error', reject);
-                                });
+                                debugLog(`File size: ${fileSizeInMB}MB`);
+                                
+                                if (fileSizeInMB <= 16) {
+                                    // Kirim file
+                                    await sock.sendMessage(from, {
+                                        audio: buffer,
+                                        mimetype: 'audio/mp4',
+                                        ptt: false
+                                    });
+                                    
+                                    debugLog('Lagu YouTube berhasil dikirim dengan Cobalt Tools!');
+                                    downloadSuccess = true;
+                                } else {
+                                    throw new Error('Ukuran file terlalu besar! Maksimal 16MB.');
+                                }
                             } else {
-                                // Gunakan ytdl-core
-                                debugLog('Mendownload dengan ytdl-core...');
-                                await new Promise((resolve, reject) => {
-                                    ytdl(url, { 
-                                        format: audioFormat,
-                                        requestOptions: {
-                                            headers: {
-                                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                                            }
-                                        }
-                                    })
-                                        .on('error', reject)
-                                        .on('info', (info) => {
-                                            debugLog(`Download progress: ${info.size} bytes`);
-                                        })
-                                        .pipe(fs.createWriteStream(outputPath))
-                                        .on('finish', resolve)
-                                        .on('error', reject);
-                                });
+                                debugLog(`Cobalt API response tidak valid: ${JSON.stringify(response.data)}`);
+                                throw new Error('Cobalt API tidak mengembalikan URL download');
                             }
-                        } catch (downloadError) {
-                            debugLog(`Error mendownload: ${downloadError.message}`);
-                            // Coba metode alternatif dengan play-dl
-                            try {
-                                debugLog('Mencoba download alternatif dengan play-dl...');
+                        } catch (err) {
+                            downloadError = err;
+                            debugLog(`Error download dengan Cobalt Tools: ${err.message}`);
+                            
+                            // Jika error adalah 429 (rate limit), coba lagi dengan delay
+                            if (err.response && err.response.status === 429) {
+                                debugLog('Rate limit terdeteksi, menunggu 5 detik...');
+                                await new Promise(resolve => setTimeout(resolve, 5000));
                                 
-                                // Gunakan quality sebagai integer (140 = audio 128kbps)
-                                const stream = await playdl.stream(url, { 
-                                    quality: 140, // Gunakan integer untuk quality
-                                    requestOptions: {
-                                        headers: {
-                                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                                        }
-                                    }
-                                });
-                                
-                                const writer = fs.createWriteStream(outputPath);
-                                stream.stream.pipe(writer);
-                                
-                                await new Promise((resolve, reject) => {
-                                    writer.on('finish', resolve);
-                                    writer.on('error', reject);
-                                });
-                            } catch (altError) {
-                                debugLog(`Error download alternatif: ${altError.message}`);
-                                
-                                // Coba dengan quality lain
+                                // Coba lagi sekali
                                 try {
-                                    debugLog('Mencoba dengan quality lain...');
-                                    const stream2 = await playdl.stream(url, { 
-                                        quality: 251, // 251 = audio opus 160kbps
-                                        requestOptions: {
+                                    debugLog('Mencoba lagi Cobalt Tools API setelah delay...');
+                                    
+                                    const response = await axios.post(cobaltApiUrl, {
+                                        url: url,
+                                        downloadMode: 'audio',
+                                        audioFormat: 'mp3',
+                                        quality: 'highest'
+                                    }, {
+                                        headers: {
+                                            'Accept': 'application/json',
+                                            'Content-Type': 'application/json',
+                                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                                        },
+                                        timeout: 60000
+                                    });
+                                    
+                                    if (response.data && response.data.url) {
+                                        const audioResponse = await axios.get(response.data.url, {
+                                            responseType: 'arraybuffer',
                                             headers: {
-                                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                                            }
+                                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                                                'Referer': 'https://cobalt.tools/'
+                                            },
+                                            timeout: 120000
+                                        });
+                                        
+                                        const buffer = Buffer.from(audioResponse.data, 'binary');
+                                        const fileSizeInMB = buffer.length / (1024 * 1024);
+                                        
+                                        if (fileSizeInMB <= 16) {
+                                            await sock.sendMessage(from, {
+                                                audio: buffer,
+                                                mimetype: 'audio/mp4',
+                                                ptt: false
+                                            });
+                                            
+                                            debugLog('Lagu YouTube berhasil dikirim dengan Cobalt Tools (retry)!');
+                                            downloadSuccess = true;
+                                        } else {
+                                            throw new Error('Ukuran file terlalu besar! Maksimal 16MB.');
                                         }
-                                    });
-                                    
-                                    const writer2 = fs.createWriteStream(outputPath);
-                                    stream2.stream.pipe(writer2);
-                                    
-                                    await new Promise((resolve, reject) => {
-                                        writer2.on('finish', resolve);
-                                        writer2.on('error', reject);
-                                    });
-                                } catch (altError2) {
-                                    debugLog(`Error download alternatif 2: ${altError2.message}`);
-                                    throw altError2;
+                                    } else {
+                                        throw new Error('Cobalt API tidak mengembalikan URL download (retry)');
+                                    }
+                                } catch (retryErr) {
+                                    debugLog(`Error retry Cobalt Tools: ${retryErr.message}`);
+                                    throw retryErr;
                                 }
                             }
                         }
                         
-                        // Cek ukuran file
-                        const stats = await fs.stat(outputPath);
-                        const fileSizeInMB = stats.size / (1024 * 1024);
-                        
-                        if (fileSizeInMB > 16) {
-                            await fs.remove(outputPath);
-                            await sock.sendMessage(from, { text: '❌ Ukuran file terlalu besar! Maksimal 16MB.' });
-                            return;
+                        // Metode 2: Jika Cobalt gagal, coba dengan youtubei.js
+                        if (!downloadSuccess) {
+                            try {
+                                debugLog('Mencoba download dengan youtubei.js...');
+                                
+                                const { Innertube, UniversalCache } = await import('youtubei.js');
+                                
+                                const youtube = await new Innertube({
+                                    cache: new UniversalCache(false),
+                                    generate_session_locally: true
+                                });
+                                
+                                // Dapatkan info video
+                                const info = await youtube.getInfo(videoId);
+                                
+                                // Pilih format audio terbaik
+                                const audioFormats = info.streaming_data.adaptive_audio_formats;
+                                const bestAudio = audioFormats
+                                    .filter(format => format.mime_type.includes('audio/mp4'))
+                                    .sort((a, b) => parseInt(b.bitrate) - parseInt(a.bitrate))[0];
+                                
+                                if (!bestAudio) {
+                                    throw new Error('Tidak dapat menemukan format audio yang sesuai');
+                                }
+                                
+                                // Download audio
+                                const stream = await youtube.download(bestAudio, {
+                                    type: 'audio',
+                                    quality: 'best'
+                                });
+                                
+                                // Konversi stream ke buffer
+                                const chunks = [];
+                                for await (const chunk of stream) {
+                                    chunks.push(chunk);
+                                }
+                                
+                                const buffer = Buffer.concat(chunks);
+                                const fileSizeInMB = buffer.length / (1024 * 1024);
+                                
+                                if (fileSizeInMB <= 16) {
+                                    // Kirim file
+                                    await sock.sendMessage(from, {
+                                        audio: buffer,
+                                        mimetype: 'audio/mp4',
+                                        ptt: false
+                                    });
+                                    
+                                    debugLog('Lagu YouTube berhasil dikirim dengan youtubei.js!');
+                                    downloadSuccess = true;
+                                } else {
+                                    throw new Error('Ukuran file terlalu besar! Maksimal 16MB.');
+                                }
+                            } catch (err) {
+                                debugLog(`Error download dengan youtubei.js: ${err.message}`);
+                            }
                         }
                         
-                        // Kirim file
-                        await sock.sendMessage(from, {
-                            audio: fs.readFileSync(outputPath),
-                            mimetype: 'audio/mp4',
-                            ptt: false
-                        });
+                        // Metode 3: Fallback ke ytdl-core
+                        if (!downloadSuccess) {
+                            try {
+                                debugLog('Mencoba download dengan ytdl-core (fallback)...');
+                                
+                                const timestamp = Date.now();
+                                const outputPath = path.join(downloadDir, `${timestamp}.mp3`);
+                                
+                                // Gunakan ytdl dengan opsi terbaru
+                                const stream = ytdl(url, {
+                                    filter: 'audioonly',
+                                    quality: 'highestaudio',
+                                    highWaterMark: 1 << 25, // 32MB
+                                    requestOptions: {
+                                        headers: {
+                                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                                            'Accept': '*/*',
+                                            'Accept-Language': 'en-US,en;q=0.5',
+                                            'Accept-Encoding': 'gzip, deflate, br',
+                                            'DNT': '1',
+                                            'Connection': 'keep-alive',
+                                            'Upgrade-Insecure-Requests': '1',
+                                            'Sec-Fetch-Dest': 'audio',
+                                            'Sec-Fetch-Mode': 'no-cors',
+                                            'Sec-Fetch-Site': 'cross-site',
+                                            'Sec-GPC': '1',
+                                            'Cookie': 'CONSENT=YES+cb.20210328-17-p0.id+FX+299; YSC=; VISITOR_INFO1_LIVE=; PREF=app=fly&f6=40000000'
+                                        }
+                                    },
+                                    dlChunkSize: 10 * 1024 * 1024, // 10MB chunks
+                                    liveBuffer: 4000
+                                });
+                                
+                                // Pipe ke file
+                                const writeStream = fs.createWriteStream(outputPath);
+                                stream.pipe(writeStream);
+                                
+                                await new Promise((resolve, reject) => {
+                                    writeStream.on('finish', resolve);
+                                    writeStream.on('error', reject);
+                                    stream.on('error', reject);
+                                    stream.on('info', (info, format) => {
+                                        debugLog(`Downloading ${info.title} - ${format.container} - ${format.audioBitrate}kbps`);
+                                    });
+                                });
+                                
+                                // Cek ukuran file
+                                const stats = await fs.stat(outputPath);
+                                const fileSizeInMB = stats.size / (1024 * 1024);
+                                
+                                if (fileSizeInMB <= 16) {
+                                    // Kirim file
+                                    await sock.sendMessage(from, {
+                                        audio: fs.readFileSync(outputPath),
+                                        mimetype: 'audio/mp4',
+                                        ptt: false
+                                    });
+                                    
+                                    // Hapus file
+                                    await fs.remove(outputPath);
+                                    
+                                    debugLog('Lagu YouTube berhasil dikirim dengan ytdl-core fallback!');
+                                    downloadSuccess = true;
+                                } else {
+                                    await fs.remove(outputPath);
+                                    throw new Error('Ukuran file terlalu besar! Maksimal 16MB.');
+                                }
+                            } catch (err) {
+                                debugLog(`Error download dengan ytdl-core fallback: ${err.message}`);
+                            }
+                        }
                         
-                        // Hapus file
-                        await fs.remove(outputPath);
+                        if (!downloadSuccess) {
+                            await sock.sendMessage(from, { text: `❌ Gagal mendownload lagu: ${downloadError?.message || 'Unknown error'}` });
+                        }
                         
-                        debugLog('Lagu YouTube berhasil dikirim!');
                     } catch (err) {
                         debugLog(`Error mendownload lagu YouTube: ${err.message}`);
                         await sock.sendMessage(from, { text: `❌ Gagal mendownload lagu: ${err.message}` });
@@ -4134,182 +4903,38 @@ async function startBot() {
         });
     } catch (err) {
         debugLog(`Error memulai bot: ${err.message}`);
+        console.error(err.stack);
         return restartBot();
-    }
-}
-
-// Fungsi untuk mengonversi gambar ke format stiker WebP
-async function convertToStickerNew(imageBuffer) {
-    try {
-        debugLog('Mengkonversi gambar ke stiker menggunakan metode buffer...');
-        
-        // Proses konversi langsung dari buffer tanpa file temporary
-        const webpBuffer = await sharp(imageBuffer)
-            .resize(512, 512, { 
-                fit: 'contain',
-                background: { r: 0, g: 0, b: 0, alpha: 0 }
-            })
-            .webp({ quality: 80 })
-            .toBuffer();
-        
-        debugLog(`Stiker berhasil dikonversi, ukuran: ${webpBuffer.length} bytes`);
-        return webpBuffer;
-    } catch (err) {
-        debugLog(`Error di convertToStickerNew: ${err.message}`);
-        
-        // Fallback ke metode lama jika metode baru gagal
-        debugLog('Mencoba metode fallback...');
-        return await convertToStickerFallback(imageBuffer);
-    }
-}
-
-// Fungsi fallback dengan penanganan file yang lebih aman
-async function convertToStickerFallback(imageBuffer) {
-    try {
-        debugLog('Menggunakan metode fallback dengan file temporary...');
-        
-        // Buat nama file unik
-        const timestamp = Date.now();
-        const randomId = Math.random().toString(36).substring(2, 15);
-        const inputPath = path.join(tempDir, `input-${timestamp}-${randomId}.jpg`);
-        const outputPath = path.join(tempDir, `output-${timestamp}-${randomId}.webp`);
-        
-        // Simpan buffer gambar ke file
-        await fs.writeFile(inputPath, imageBuffer);
-        
-        // Proses konversi
-        await sharp(inputPath)
-            .resize(512, 512, { 
-                fit: 'contain',
-                background: { r: 0, g: 0, b: 0, alpha: 0 }
-            })
-            .webp({ quality: 80 })
-            .toFile(outputPath);
-        
-        // Baca hasil konversi
-        const webpBuffer = await fs.readFile(outputPath);
-        
-        // Hapus file dengan delay untuk memastikan tidak digunakan
-        setTimeout(async () => {
-            try {
-                await fs.remove(inputPath);
-                debugLog(`File input dihapus: ${inputPath}`);
-            } catch (err) {
-                debugLog(`Error menghapus file input: ${err.message}`);
-            }
-        }, 1000);
-        
-        setTimeout(async () => {
-            try {
-                await fs.remove(outputPath);
-                debugLog(`File output dihapus: ${outputPath}`);
-            } catch (err) {
-                debugLog(`Error menghapus file output: ${err.message}`);
-            }
-        }, 2000);
-        
-        return webpBuffer;
-    } catch (err) {
-        debugLog(`Error di convertToStickerFallback: ${err.message}`);
-        throw err;
-    }
-}
-
-// Fungsi untuk membuat meme menggunakan Sharp (tanpa Jimp)
-async function createMeme(imageBuffer, topText = '', bottomText = '') {
-    try {
-        debugLog('Membuat meme dengan Sharp...');
-        
-        // Baca gambar dengan Sharp
-        const image = sharp(imageBuffer);
-        const metadata = await image.metadata();
-        
-        const width = metadata.width;
-        const height = metadata.height;
-        
-        // Buat SVG untuk teks atas
-        let topTextSvg = null;
-        if (topText) {
-            const fontSize = Math.floor(width / 15);
-            const strokeWidth = Math.max(2, Math.floor(fontSize / 10));
-            
-            topTextSvg = Buffer.from(`
-                <svg width="${width}" height="${height}">
-                    <style>
-                        .text {
-                            font-family: Arial, sans-serif;
-                            font-size: ${fontSize}px;
-                            font-weight: bold;
-                            fill: white;
-                            stroke: black;
-                            stroke-width: ${strokeWidth}px;
-                            text-anchor: middle;
-                        }
-                    </style>
-                    <text x="${width/2}" y="${fontSize * 1.2}" class="text">${topText.toUpperCase()}</text>
-                </svg>
-            `);
-        }
-        
-        // Buat SVG untuk teks bawah
-        let bottomTextSvg = null;
-        if (bottomText) {
-            const fontSize = Math.floor(width / 15);
-            const strokeWidth = Math.max(2, Math.floor(fontSize / 10));
-            
-            bottomTextSvg = Buffer.from(`
-                <svg width="${width}" height="${height}">
-                    <style>
-                        .text {
-                            font-family: Arial, sans-serif;
-                            font-size: ${fontSize}px;
-                            font-weight: bold;
-                            fill: white;
-                            stroke: black;
-                            stroke-width: ${strokeWidth}px;
-                            text-anchor: middle;
-                        }
-                    </style>
-                    <text x="${width/2}" y="${height - fontSize * 0.2}" class="text">${bottomText.toUpperCase()}</text>
-                </svg>
-            `);
-        }
-        
-        // Gabungkan gambar dengan teks
-        let result = image;
-        
-        if (topTextSvg) {
-            const topTextImage = sharp(topTextSvg);
-            result = result.composite([{ input: topTextImage, blend: 'over' }]);
-        }
-        
-        if (bottomTextSvg) {
-            const bottomTextImage = sharp(bottomTextSvg);
-            result = result.composite([{ input: bottomTextImage, blend: 'over' }]);
-        }
-        
-        // Konversi ke buffer
-        const buffer = await result.toBuffer();
-        
-        debugLog('Meme berhasil dibuat dengan Sharp');
-        return buffer;
-    } catch (err) {
-        debugLog(`Error membuat meme dengan Sharp: ${err.message}`);
-        throw err;
     }
 }
 
 // Tangani proses exit
 process.on('SIGINT', async () => {
     debugLog('Menerima SIGINT, mematikan bot dengan aman...');
-    if (sock) {
-        sock.ev.removeAllListeners();
-        sock.ws.close();
-    }
     isRunning = false;
     
-    // Hentikan tunnel
-    await stopTunnel();
+    if (sock) {
+        try {
+            // Simpan session sebelum menutup
+            if (sock.authState && sock.authState.creds) {
+                await saveCreds();
+                debugLog('Session state saved before exit');
+            }
+            
+            // Hapus semua event listener
+            sock.ev.removeAllListeners();
+            
+            // Tutup koneksi
+            if (sock.ws) {
+                sock.ws.close();
+            }
+            
+            // Hapus referensi socket
+            sock = null;
+        } catch (err) {
+            debugLog(`Error menutup socket: ${err.message}`);
+        }
+    }
     
     // Bersihkan direktori temporary
     try {
@@ -4319,38 +4944,51 @@ process.on('SIGINT', async () => {
         debugLog(`Error membersihkan direktori temporary: ${err.message}`);
     }
     
+    // Hapus lock file
+    try {
+        if (fs.existsSync(INSTANCE_LOCK_FILE)) {
+            fs.unlinkSync(INSTANCE_LOCK_FILE);
+            debugLog('Lock file dihapus');
+        }
+    } catch (err) {
+        debugLog(`Error menghapus lock file: ${err.message}`);
+    }
+    
     process.exit(0);
 });
 
 // Tangani unhandled promise rejection
 process.on('unhandledRejection', (reason, promise) => {
     debugLog(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
+    console.error(reason);
 });
 
 // Tangani uncaught exception
 process.on('uncaughtException', (err) => {
     debugLog(`Uncaught Exception: ${err.message}`);
     console.error(err.stack);
+    
+    // Restart bot jika terjadi uncaught exception
+    restartBot();
 });
+
+// Bersihkan memori setiap jam
+setInterval(() => {
+    if (global.gc) {
+        global.gc();
+        debugLog('Memory garbage collected');
+    }
+}, 3600000); // 1 jam
 
 // Jalankan bot
 console.log('╔═════════════════════════════════════════╗');
 console.log('║          REZIUM-V2 WHATSAPP BOT          ║');
 console.log('╚═════════════════════════════════════════╝');
+debugLog('Bot dimulai pada: ' + new Date().toISOString());
+debugLog(`Node version: ${process.version}`);
+debugLog(`Platform: ${process.platform} ${process.arch}`);
 debugLog('Memulai bot...');
-
-// Mulai server dan tunnel sebelum memulai bot
-startServer().then(({ server, tunnelUrl: url }) => {
-    tunnelUrl = url;
-    debugLog(`Server dan tunnel siap, URL: ${tunnelUrl}`);
-    startBot().catch(err => {
-        debugLog(`Fatal error: ${err.message}`);
-        console.error(err.stack);
-    });
-}).catch(err => {
-    debugLog(`Error memulai server/tunnel: ${err.message}`);
-    startBot().catch(err => {
-        debugLog(`Fatal error: ${err.message}`);
-        console.error(err.stack);
-    });
+startBot().catch(err => {
+    debugLog(`Fatal error: ${err.message}`);
+    console.error(err.stack);
 });

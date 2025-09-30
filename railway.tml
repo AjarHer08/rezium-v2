@@ -1,0 +1,9 @@
+[build]
+command = "npm ci"
+
+[deploy]
+startCommand = "node index.js"
+
+[env]
+NODE_ENV = "production"
+PORT = "9000"
